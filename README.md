@@ -1,5 +1,7 @@
 # Raw Bluetooth for macOS
 
+Current version: **0.3.1** (build 4).
+
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
 Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and translates HID reports into native macOS input events. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
@@ -20,6 +22,7 @@ Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for 
 | Relative mouse movement, buttons, vertical/horizontal scrolling | Implemented; Logitech M196 verified on the development setup |
 | BLE keyboards, modifiers, repeat, NKRO and common media usages | Implemented; Logitech K250 pairing workflow documented |
 | Mouse and keyboard connected together | Implemented |
+| Automatic recovery from temporary input socket congestion | Shared by all supported BLE mice and keyboards; regression tested |
 | Saved devices and automatic reconnection | Implemented; requires an active app session and device advertising |
 | Mouse and scroll speed controls | Implemented |
 | Bluetooth Classic audio discovery | Implemented |
@@ -29,6 +32,8 @@ Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for 
 | Boot/login-screen input and guaranteed recovery after sleep | Not supported |
 
 Other BLE HID devices may work, but this is not a general compatibility guarantee. Bluetooth Classic HID and proprietary receiver protocols are outside the implemented BLE HID path.
+
+Mouse and keyboard reports are decoded from each device's HID descriptor rather than a brand-specific packet layout. Input forwarding and temporary socket congestion recovery use the same code for every device. Recovery retries packets in order, including key-up and button-up events. This does not establish compatibility with every Bluetooth mouse or keyboard; new models still need discovery, pairing, input, and reconnection checks on real hardware.
 
 ## Requirements
 
@@ -92,7 +97,7 @@ This build does not offer permanent administrator authorization. It requests aut
 .venv/bin/pip check
 ```
 
-The current suite contains 17 tests covering HID parsing and backend behavior. Passing these tests does not establish hardware compatibility, Accessibility authorization, audio playback, or USB recovery on another Mac.
+The suite covers HID parsing, backend behavior, and input forwarding under temporary socket congestion for both mice and keyboards. Passing these tests does not establish hardware compatibility, Accessibility authorization, audio playback, or USB recovery on another Mac.
 
 ## Local data and privacy
 

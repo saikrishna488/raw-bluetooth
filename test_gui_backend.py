@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from m196_driver import SocketPointer
 from bumble.core import AdvertisingData
-from gui_backend import advertisement_info, read_command, Backend, DisplayPasskey
+from gui_backend import advertisement_info, read_command, Backend, DisplayPasskey, DeviceOutput
 
 
 def advertisement(data, connectable=True):
@@ -53,6 +53,42 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generic_mouse_and_keyboard_keep_delivering_after_congestion(self):
+        # Exercise the same per-device forwarding used for every BLE HID brand,
+        # including keyboard key-up and per-device release packets.
+        delivered = []
+        attempts = 0
+
+        async def send(sock, data):
+            nonlocal attempts
+            attempts += 1
+            if attempts % 3:
+                raise OSError(errno.ENOBUFS, 'temporary socket congestion')
+            delivered.append(json.loads(data))
+
+        loop = asyncio.get_running_loop()
+        outputs = []
+        with patch('m196_driver.socket.socket') as socket_factory, patch.object(loop, 'sock_sendall', send):
+            try:
+                for address, reports in (
+                    ('generic-mouse', [{'x': 3, 'y': -2, 'button1': True}, {'button1': False, 'wheel': 1}]),
+                    ('generic-keyboard', [{'kind': 'keyboard', 'keys': [4], 'consumer': []},
+                                          {'kind': 'keyboard', 'keys': [], 'consumer': []}]),
+                ):
+                    output = DeviceOutput('/unused-test-socket', address)
+                    outputs.append(output)
+                    for report in reports:
+                        output.apply(report)
+                    output.release()
+                    await asyncio.wait_for(output.output.queue.join(), 1)
+                    self.assertIsNone(output.output.failure)
+                    self.assertEqual(delivered[-3:], [dict(report, device=address) for report in reports]
+                                     + [{'kind': 'release', 'device': address}])
+                self.assertEqual(socket_factory.call_count, 2)
+            finally:
+                for output in outputs:
+                    await output.close()
+
     async def test_input_sender_recovers_from_temporary_socket_congestion(self):
         sender = SocketPointer.__new__(SocketPointer)
         sender.sock = object()
