@@ -22,7 +22,7 @@ The backend uses `adapters.select_transport()` for default selection, opens Bumb
 
 The GUI provides a menu bar icon and can keep running after its main window closes. This preserves the worker and native input output in the logged-in user session. Startup and background preferences are stored in macOS UserDefaults; launch at login is registered through `SMAppService.mainApp` and remains subject to macOS approval. The app does not install a persistent privileged helper.
 
-The GUI renews a heartbeat. The worker stops after a lease expires if the GUI crashes or disappears; normal shutdown disconnects peers, attempts a controller reset, and releases the USB transport. This cleanup is best effort: USB resets and deep sleep can still require manual recovery.
+The GUI renews a heartbeat on a dedicated dispatch queue, independently of UI polling. An activity token prevents App Nap throttling during an adapter session while allowing normal system sleep. The worker stops after a lease expires if the GUI crashes or disappears; normal shutdown disconnects peers, attempts a controller reset, and releases the USB transport. Session events record heartbeat expiry, an explicit Stop command, or a shutdown signal. This cleanup is best effort: USB resets and deep sleep can still require manual recovery.
 
 ## Input decoding
 
@@ -73,3 +73,11 @@ Input socket delivery retries temporary macOS datagram buffer exhaustion in orde
 Identity, bonds, and preferences are created with owner-only permissions. Some files are owned by root because the USB worker runs with administrator privileges. Bond keys are not included in GUI status events. The CLI scanner and mouse diagnostics can expose addresses and reports, so review logs before attaching them to an issue.
 
 The signing certificate is pinned in the app's designated requirement so the identity stays stable across builds. Preserve `.signing/` locally to retain that identity and associated Accessibility authorization. A fresh checkout creates its own identity. The build temporarily adds its dedicated keychain to the user search list and restores the previous list afterward.
+
+## Distributable builds
+
+`packaging/build_release.py` builds the Swift frontend and a nested PyInstaller worker app. The worker includes its interpreter and USB dependencies. FFmpeg is built from checksum-pinned upstream source with only the LGPL test-tone components; the development environment's imageio FFmpeg binary is excluded. Source archives, build options and third-party notices accompany the bundled libraries.
+
+Installed builds select `Contents/Helpers/backend.app` rather than a source checkout. The GUI creates `~/Library/Application Support/Raw Bluetooth` as the logged-in user and passes it explicitly to the authorized worker. Identity, bonds, report maps and saved-device data are kept there. Source builds retain their checkout-local state. The installer contains neither private runtime state nor the local development signing identity.
+
+The DMG uses ad-hoc signatures and is not notarized. Release verification mounts it read-only, checks signatures and package contents, and exercises backend imports, the bundled USB library and FFmpeg without a checkout or Python on PATH. Hardware pairing and permission prompts still require manual testing on a separate Mac.

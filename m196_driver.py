@@ -19,7 +19,7 @@ from hid_mouse import MouseReports
 from hid_keyboard import KeyboardReports
 from pointer import Pointer, request_accessibility
 
-ROOT = Path(__file__).resolve().parent
+from runtime_paths import data_directory
 
 
 class SocketPointer:
@@ -70,7 +70,7 @@ class SocketPointer:
 
 
 def configuration(classic_enabled=False):
-    identity = ROOT / 'driver-identity.json'
+    identity = data_directory() / 'driver-identity.json'
     if not identity.exists():
         config = {
             'address': str(hci.Address.generate_static_address()),
@@ -82,7 +82,7 @@ def configuration(classic_enabled=False):
     return DeviceConfiguration(
         name='M196 Raw Host', address=hci.Address(config['address']),
         irk=bytes.fromhex(config['irk']), le_enabled=True, classic_enabled=classic_enabled,
-        keystore=f'JsonKeyStore:{ROOT / "driver-bonds.json"}',
+        keystore=f'JsonKeyStore:{data_directory() / "driver-bonds.json"}',
     )
 
 
@@ -144,7 +144,7 @@ async def use_mouse(device, address, args, pointer, observer=None):
         if not maps:
             raise RuntimeError('HID Report Map characteristic missing')
         descriptor = await maps[0].read_value()
-        (ROOT / ('keyboard-report-map.hex' if keyboard else 'm196-report-map.hex')).write_text(descriptor.hex() + '\n')
+        (data_directory() / ('keyboard-report-map.hex' if keyboard else 'm196-report-map.hex')).write_text(descriptor.hex() + '\n')
         decoder = KeyboardReports(descriptor) if keyboard else MouseReports(descriptor)
         if keyboard and not any(field.page == 7 for fields in decoder.fields.values() for field in fields):
             raise RuntimeError('This HID device does not provide keyboard input')

@@ -97,16 +97,44 @@ final class BluetoothModel: ObservableObject {
     var timer: Timer?
     var eventOffset: UInt64 = 0
     var pending = Data()
-    var heartbeatCounter = 0
+    var heartbeatTimer: DispatchSourceTimer?
+    var sessionActivity: NSObjectProtocol?
+
+    func startHeartbeat(in folder: URL) {
+        stopHeartbeat()
+        // Input forwarding is an active service even with the window hidden.
+        // Allow normal system sleep while preventing App Nap timer throttling.
+        sessionActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Forwarding Bluetooth mouse and keyboard input")
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "local.rawbluetooth.heartbeat"))
+        let heartbeat = folder.appendingPathComponent("heartbeat")
+        timer.schedule(deadline: .now(), repeating: .seconds(2), leeway: .milliseconds(200))
+        timer.setEventHandler { try? Data().write(to: heartbeat, options: .atomic) }
+        heartbeatTimer = timer
+        timer.resume()
+    }
+
+    func stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+        if let activity = sessionActivity { ProcessInfo.processInfo.endActivity(activity) }
+        sessionActivity = nil
+    }
     let source: URL
+    let dataDirectory: URL
+    let packagedWorker: URL?
     let preview: Bool
 
     init() {
         source = URL(fileURLWithPath: Bundle.main.object(forInfoDictionaryKey: "DriverSourceDirectory") as? String ?? FileManager.default.currentDirectoryPath)
+        let worker = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/backend.app/Contents/MacOS/raw-bluetooth-backend")
+        packagedWorker = FileManager.default.isExecutableFile(atPath: worker.path) ? worker : nil
+        dataDirectory = packagedWorker == nil ? source : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Raw Bluetooth")
         preview = CommandLine.arguments.contains("--preview")
         timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in self?.poll() }
         RunLoop.main.add(timer!, forMode: .common)
-        if let data = try? Data(contentsOf: source.appendingPathComponent("saved-devices.json")),
+        if let data = try? Data(contentsOf: dataDirectory.appendingPathComponent("saved-devices.json")),
            let records = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
             for (address, info) in records {
                 savedDevices[address] = info["auto_reconnect"] as? Bool ?? true
@@ -185,9 +213,11 @@ final class BluetoothModel: ObservableObject {
                 pointer = try PointerServer(path: folder.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity, scrollPageLength: scrollPageLength)
             }
             FileManager.default.createFile(atPath: folder.appendingPathComponent("backend.log").path, contents: nil)
+            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let python = source.appendingPathComponent(".venv/bin/python").path
             let script = source.appendingPathComponent("gui_backend.py").path
-            let shell = "\(shellQuote(python)) -u \(shellQuote(script)) --session \(shellQuote(folder.path)) > \(shellQuote(folder.appendingPathComponent("backend.log").path)) 2>&1"
+            let command = packagedWorker.map { "\(shellQuote($0.path)) --data-dir \(shellQuote(dataDirectory.path))" } ?? "\(shellQuote(python)) -u \(shellQuote(script))"
+            let shell = "\(command) --session \(shellQuote(folder.path)) > \(shellQuote(folder.appendingPathComponent("backend.log").path)) 2>&1"
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             process.arguments = ["-e", "do shell script \(appleQuote(shell)) with administrator privileges"]
@@ -222,7 +252,9 @@ final class BluetoothModel: ObservableObject {
             status = "Authorize adapter access…"
             log("Requesting access to the USB Bluetooth adapter")
             try process.run()
+            startHeartbeat(in: folder)
         } catch {
+            stopHeartbeat()
             backend = nil
             active = false
             fail(error.localizedDescription)
@@ -279,6 +311,7 @@ final class BluetoothModel: ObservableObject {
         command("stop")
     }
     func stopPointer() {
+        stopHeartbeat()
         pointer?.stop()
         pointer = nil
     }
@@ -295,10 +328,6 @@ final class BluetoothModel: ObservableObject {
         if pointerAllowed && pointer == nil && savedDevices.values.contains(true) && !stopping {
             do { pointer = try PointerServer(path: session.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity, scrollPageLength: scrollPageLength) }
             catch { log("Input server could not start: \(error.localizedDescription)") }
-        }
-        heartbeatCounter += 1
-        if heartbeatCounter % 5 == 0 && !stopping {
-            try? Data().write(to: session.appendingPathComponent("heartbeat"), options: .atomic)
         }
         guard let file = try? FileHandle(forReadingFrom: session.appendingPathComponent("events.jsonl")) else { return }
         defer { try? file.close() }
@@ -400,6 +429,8 @@ final class BluetoothModel: ObservableObject {
                 if pendingAddress == address { pendingAddress = nil; pairingCode = nil }
             }
             status = connectedAddresses.isEmpty ? "Disconnected" : "\(connectedAddresses.count) input device(s) connected"
+        case "session_ending":
+            log(event["message"] as? String ?? "Adapter session ending")
         case "stopped": active = false; scanning = false; connectedAddresses = []; pendingAddress = nil; pairingCode = nil; status = "Adapter released"; stopPointer()
         default: break
         }

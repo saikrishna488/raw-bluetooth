@@ -20,6 +20,7 @@ from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.transport import open_transport
 from m196_driver import SocketPointer, configuration, use_mouse
 from saved_devices import SavedDevices
+from runtime_paths import data_directory
 from adapters import select_transport, migrate_bonds, forget_bond
 from bumble.keys import JsonKeyStore
 from audio_stream import A2DPTestTone
@@ -103,7 +104,7 @@ class Backend:
         self.stopping = False
         self.pointer = None
         self.scan_lock = asyncio.Lock()
-        self.saved = SavedDevices(saved_path or Path(__file__).parent / 'saved-devices.json')
+        self.saved = SavedDevices(saved_path or data_directory() / 'saved-devices.json')
         self.manual_pause = set()
         self.retry_at, self.retry_count = {}, {}
         self.connecting_key = None
@@ -211,7 +212,7 @@ class Backend:
         await self.disconnect_audio(key)
         await self.disconnect(key)
         self.saved.forget(key)
-        forget_bond(Path(__file__).parent / 'driver-bonds.json', key)
+        forget_bond(data_directory() / 'driver-bonds.json', key)
         self.manual_pause.discard(key)
         self.retry_at.pop(key, None)
         self.retry_count.pop(key, None)
@@ -362,7 +363,7 @@ class Backend:
 
     async def run(self):
         # The command-line driver may be running; request its normal cleanup first.
-        (Path(__file__).parent / 'driver.stop').touch()
+        (data_directory() / 'driver.stop').touch()
         self.emit('starting', message='Taking control of the USB Bluetooth adapter…')
         self.transport_name, native_audio = await asyncio.to_thread(select_transport, self.transport_name)
         self.emit('adapter', transport=self.transport_name, native_audio=native_audio)
@@ -377,7 +378,7 @@ class Backend:
                 await asyncio.sleep(0.5)
         async with transport:
             self.device = Device.from_config_with_hci(configuration(classic_enabled=True), transport.source, transport.sink)
-            bonds = Path(__file__).parent / 'driver-bonds.json'
+            bonds = data_directory() / 'driver-bonds.json'
             migrate_bonds(bonds, self.saved.devices)
             self.device.keystore = JsonKeyStore('RawBluetooth', filename=str(bonds))
             self.device.pairing_config_factory = self.pairing_config
@@ -403,6 +404,8 @@ class Backend:
                     except FileNotFoundError:
                         pass
                     if time.monotonic() - last_heartbeat > 15:
+                        self.emit('session_ending', reason='heartbeat_expired',
+                                  message='Adapter released because the app heartbeat expired')
                         break
                     command = read_command(self.folder / 'command.json', last_id)
                     if command:
@@ -410,6 +413,8 @@ class Backend:
                         try:
                             action = command['action']
                             if action == 'stop':
+                                self.emit('session_ending', reason='stop_command',
+                                          message='Adapter released by an app Stop command')
                                 break
                             if action == 'scan':
                                 await self.scan()
@@ -456,7 +461,7 @@ async def main(args):
     try:
         await task
     except asyncio.CancelledError:
-        pass
+        backend.emit('session_ending', reason='signal', message='Adapter worker received a shutdown signal')
     except Exception as exc:
         backend.emit('error', message=str(exc))
         raise

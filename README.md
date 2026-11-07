@@ -1,12 +1,32 @@
 # Raw Bluetooth for macOS
 
-Current version: **0.3.3** (build 6).
+Current version: **0.4.0** (build 7).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
 Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and translates HID reports into native macOS input events. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
 
 **Mouse and keyboard support is working on the development setup. Audio is still in progress.** A2DP/SBC test-tone playback is implemented, but the app does not provide a macOS system audio output or microphone input.
+
+## Install the compiled app
+
+Download the Intel `.dmg` from [GitHub Releases](https://github.com/saikrishna488/raw-bluetooth/releases), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
+
+This preview is ad-hoc signed and **not notarized**. If macOS blocks opening, use **System Settings → Privacy & Security → Open Anyway** after attempting to launch it. Grant **Accessibility** permission and approve the administrator request when starting a USB session. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
+
+The installed app keeps pairing keys and preferences in `~/Library/Application Support/Raw Bluetooth`. Development-checkout pairings are not automatically migrated. See [installation and limitations](packaging/INSTALL.txt). Source setup remains available below.
+
+### Build a distributable installer
+
+On an Intel Mac with Xcode Command Line Tools, create a build environment and run:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r packaging/requirements-build.txt
+.venv/bin/python packaging/build_release.py
+```
+
+The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace your installed development app or use its local signing key. GitHub Actions builds and publishes a prerelease when the version or packaging changes on `main`; each published installer requires a new version. Developer ID signing and notarization are not automated in this preview.
 
 ## GUI preview
 

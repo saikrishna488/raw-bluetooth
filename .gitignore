@@ -15,3 +15,7 @@ driver.stop
 *.log
 *.sock
 pointer.ready
+
+build/
+dist/
+*.spec

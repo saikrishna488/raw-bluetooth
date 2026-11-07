@@ -1,6 +1,8 @@
 """Standalone A2DP playback helpers for classic Bluetooth audio sinks."""
 import asyncio
 import logging
+from pathlib import Path
+import sys
 
 from bumble import a2dp, avdtp
 from bumble.device import PhysicalTransport
@@ -48,7 +50,6 @@ class A2DPTestTone:
         self.pump = None
 
     async def start(self):
-        import imageio_ffmpeg
 
         self.connection = await self.device.connect(
             self.address, transport=PhysicalTransport.BR_EDR, timeout=20
@@ -72,7 +73,7 @@ class A2DPTestTone:
                 + (f' (reported codecs: {", ".join(codecs)})' if codecs else '')
             )
 
-        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg = ffmpeg_executable()
         self.process = await asyncio.create_subprocess_exec(
             ffmpeg,
             '-hide_banner', '-loglevel', 'error', '-re',
@@ -108,3 +109,10 @@ class A2DPTestTone:
                 await self.process.wait()
         if self.connection:
             await self.connection.disconnect()
+
+
+def ffmpeg_executable():
+    if getattr(sys, 'frozen', False):
+        return str(Path(sys._MEIPASS) / 'ffmpeg')
+    import imageio_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
