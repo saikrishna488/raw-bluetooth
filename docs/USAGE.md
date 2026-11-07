@@ -4,6 +4,10 @@ Start with the [installation instructions](../README.md#quick-start). Run comman
 
 ## Desktop app
 
+![Discovery screen with the device filters on the left, nearby devices in the center, and device details on the right](../gui/window-preview.png)
+
+*Earlier UI preview: newer keyboard, saved-device, speed, and audio controls are not shown in this capture.*
+
 **Scan devices** starts discovery and requests administrator authentication for USB access. Search by name/address, or use the Mice, Keyboards, Connectable, Audio, and Saved filters. Select an entry to inspect its address, signal, type, and connection availability. A discovery entry alone does not establish that its protocol is supported.
 
 Connect a BLE mouse or keyboard using the corresponding action. A mouse and keyboard can remain connected together. For keyboard pairing, enter the displayed passkey on the keyboard being paired, preserving leading zeroes, then press Enter. The connected keyboard has a local test field. Adjust **Mouse speed** and **Scroll speed** independently; their settings persist across launches.

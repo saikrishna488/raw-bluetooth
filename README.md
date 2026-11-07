@@ -6,6 +6,12 @@ Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for 
 
 **Mouse and keyboard support is working on the development setup. Audio is still in progress.** A2DP/SBC test-tone playback is implemented, but the app does not provide a macOS system audio output or microphone input.
 
+## GUI preview
+
+![Raw Bluetooth desktop GUI showing the device library, discovery area, and device details panel](gui/window-preview.png)
+
+*Earlier development screenshot of the discovery screen. The current app also includes keyboard, saved-device, speed, and experimental audio controls described below.*
+
 ## Current support
 
 | Capability | Status |
