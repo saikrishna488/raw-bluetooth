@@ -1,161 +1,86 @@
-# Experimental M196 userspace driver
+# Raw Bluetooth for macOS
 
-Direct USB HCI transport -> Google Bumble Bluetooth stack -> HID report-map
-decoder -> CoreGraphics pointer events. Does not use CoreBluetooth or macOS
-Bluetooth pairing. This is a userspace driver, not an installable kernel extension.
+Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
-## Desktop app
+Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and translates HID reports into native macOS input events. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
 
-Open `~/Applications/Raw Bluetooth.app`. Click **Scan devices** and authenticate
-in the macOS administrator dialog. The app takes control of the CSR USB adapter
-and discovers BLE devices directly, independently of System Settings.
-The built-in Lite-On Bluetooth radio is excluded from raw sessions; this does
-not disable or change the Mac's Wi-Fi interface.
+**Mouse and keyboard support is working on the development setup. Audio is still in progress.** A2DP/SBC test-tone playback is implemented, but the app does not provide a macOS system audio output or microphone input.
 
-Select a device to see its address, signal, type, and connection availability.
-The sidebar's **Mouse speed** and **Scroll speed** sliders adjust raw pointer movement
-and wheel scrolling independently, and keep their settings across app launches.
-Use **Connect mouse** or **Connect keyboard** to pair/encrypt a BLE HID input
-device. Mouse and keyboard connections can remain active together. The **Mice**,
-**Keyboards**, and **Connectable** filters and name/address search narrow the list.
-**Disconnect** returns to discovery; **Release adapter** gives USB back to macOS.
-There is no session timer in the desktop app. Keep it running while you use the
-devices. Successfully connected devices are saved with automatic reconnection
-enabled by default. The **Saved** filter and per-device **Reconnect automatically**
-switch control this preference. A saved device reconnects when it advertises after
-waking or being powered on, using its existing bond; it does not repeat PIN pairing.
-An intentional **Disconnect** pauses retries for that device until the next app
-session or until you explicitly reconnect/re-enable automatic reconnection.
+## Current support
 
-On a later app launch, saved devices start an adapter session automatically. macOS
-may still require administrator authentication for USB access. To wake an already
-paired device, move/click the mouse or press a keyboard key; do not hold the pairing
-button unless you intend to pair again. If a device clears its bond or changes its
-identity during re-pairing, connect it manually once to save the new identity.
-The activity event stream is bounded and reconnect retries use a delay to avoid
-continually retrying an unavailable device. Deep Mac sleep/USB controller resets
-may require restarting the adapter session; this is not a system boot driver.
+| Capability | Status |
+| --- | --- |
+| BLE discovery and encrypted HID pairing | Implemented |
+| Relative mouse movement, buttons, vertical/horizontal scrolling | Implemented; Logitech M196 verified on the development setup |
+| BLE keyboards, modifiers, repeat, NKRO and common media usages | Implemented; Logitech K250 pairing workflow documented |
+| Mouse and keyboard connected together | Implemented |
+| Saved devices and automatic reconnection | Implemented; requires an active app session and device advertising |
+| Mouse and scroll speed controls | Implemented |
+| Bluetooth Classic audio discovery | Implemented |
+| A2DP/SBC built-in test tone | Experimental; device compatibility is not established broadly |
+| System-wide audio routing, microphone, HFP/SCO | Not implemented |
+| Keyboard LED synchronization and vendor-specific Fn functions | Not implemented |
+| Boot/login-screen input and guaranteed recovery after sleep | Not supported |
 
-Closing the app requests cleanup; a heartbeat lease releases the adapter if the
-app unexpectedly exits. Grant **Raw Bluetooth** access in Privacy & Security →
-Accessibility before pointer output is available. GUI pointer events are posted
-by the native app; Python Accessibility permission is not needed for the GUI.
+Other BLE HID devices may work, but this is not a general compatibility guarantee. Bluetooth Classic HID and proprietary receiver protocols are outside the implemented BLE HID path.
 
-For the Bluetooth Logitech K250, hold the Bluetooth button until its light blinks,
-select it and click **Connect keyboard**. When the six-digit pairing code appears,
-type it on the K250 and press Enter. Pairing can take up to two minutes. A connected
-keyboard has a local test field for verifying typing. Keyboard reports support
-standard key arrays, NKRO bitmaps, modifiers, repeat and common media usages.
-Keypress contents are never written to the activity or driver logs.
+## Requirements
 
-Discovery includes BLE advertisers and Bluetooth Classic inquiry results for
-audio devices. Input supports relative HID mice and BLE HID keyboards. The Audio
-filter can connect to an A2DP SBC sink and play a built-in test tone directly
-through the external adapter. This is standalone app playback; it does not yet
-route all macOS system audio or expose the AirPods microphone as a macOS input.
-HFP/SCO microphone audio and arbitrary GATT device control are not implemented.
-Keyboard LED synchronization and vendor
-specific Fn functions are not implemented. The GUI uses the existing saved host identity
-and bonds; bond keys are never sent through GUI status events. Device preferences
-are saved separately in `saved-devices.json` with owner-only permissions.
+- macOS 13 or later, with a logged-in desktop session.
+- Xcode Command Line Tools (`swiftc`, installed with `xcode-select --install`).
+- Python 3.9 or later. The pinned environment was developed with Python 3.9; other versions need validation.
+- An external CSR USB Bluetooth adapter with USB ID **`0a12:0001`** for the default transport.
+- Administrator authentication to claim the USB adapter and Accessibility permission for input output.
 
-The app is locally built and signed, and depends on this source directory
-and its `.venv`. Rebuild with `./gui/build.command` after moving the source or
-changing the Swift UI. `gui/sign_app.py` maintains a dedicated private signing
-identity in `.signing/`; the certificate's local trust policy is restricted to code
-signing. Its certificate-pinned designated requirement stays stable across builds
-so Accessibility authorization survives updates. Keep `.signing/` private and
-preserve it across builds. Administrator authorization is requested once per
-adapter session; the GUI and pointer output run as your normal user.
+The build script currently targets **`x86_64-apple-macosx13.0`**. Native Apple Silicon builds are not configured or validated. Sharing a USB ID does not guarantee identical dongle firmware or behavior.
 
-Implementation: `gui/RawBluetooth.swift` (native SwiftUI/AppKit),
-`gui/PointerServer.swift` (native unprivileged pointer output), `gui_backend.py`
-(exclusive USB HCI and BLE control), and `m196_driver.py` (pairing/HID support).
-`pointer_bridge.py` remains available for the separate command-line launcher.
+The external adapter is exclusively occupied during a raw session. The default selection deliberately excludes the internal Lite-On `04ca:3018` radio. The Atheros firmware helper in the repository is not used by default adapter selection.
 
-## Build and run
-
-Requirements: macOS 13 or later, Xcode Command Line Tools (for `swiftc`),
-Python 3.9 or later, and a supported USB Bluetooth adapter. The adapter is
-exclusively controlled while a raw Bluetooth session is active.
-
-From the checkout directory, create an environment and install the pinned
-dependencies:
+## Quick start
 
 ```sh
+git clone https://github.com/saikrishna488/raw-bluetooth.git
+cd raw-bluetooth
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/pip install -r requirements-lock.txt
+./gui/build.command
+open "$HOME/Applications/Raw Bluetooth.app"
 ```
 
-Build the desktop app with `./gui/build.command`. The script installs it under
-`~/Applications/Raw Bluetooth.app` and creates a local development signing
-identity in `.signing/`. This identity is specific to the local Mac and must
-not be shared. The app embeds the checkout path during build, so rebuild after
-moving the checkout. The command-line launcher also uses `.venv`.
+The build installs the app in `~/Applications` and creates a private local development signing identity in `.signing/`. It embeds the checkout path: keep this source directory and its `.venv` in place, and rebuild after moving it. This is a locally signed development build, not a standalone notarized installer.
 
-## Command-line use
+1. Plug in the dongle and open **Raw Bluetooth**.
+2. In **System Settings → Privacy & Security → Accessibility**, grant **Raw Bluetooth** permission.
+3. Click **Scan devices** and authenticate in the administrator dialog.
+4. Put the mouse or keyboard into Bluetooth pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
+5. For keyboard passkey pairing, type the displayed six-digit code on the keyboard being paired and press Enter.
+6. Keep the app running. Use **Release adapter** when finished.
 
-Double-click `Start M196 Driver.command` to start a session (up to 24 hours).
-Authenticate in the macOS administrator dialog. Double-click
-`Stop M196 Driver.command` to stop it and release the USB adapter. Reconnect
-uses the observed mouse address as well as its advertised name.
+For an M196, hold its bottom pairing button for about three seconds until blinking. For a K250, hold its Bluetooth button until blinking. Pairing may take up to two minutes.
 
-From this directory, first verify live input without moving the system cursor:
+## Documentation
 
-```sh
-sudo .venv/bin/python -u m196_driver.py --dry-run
-```
+- [User guide and command-line reference](docs/USAGE.md)
+- [Architecture and repository map](docs/ARCHITECTURE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Contributing and validation](CONTRIBUTING.md)
 
-Hold the M196 bottom button for three seconds until blinking. The program selects
-connectable advertisements containing `M196`, encrypts/pairs, reads the HID report
-descriptor and subscribes to input reports. Move and click the mouse after READY.
-`--address ADDRESS` restricts selection to a specific device address.
-
-To forward input into macOS:
-
-```sh
-# Terminal 1, as your normal user:
-.venv/bin/python -u pointer_bridge.py --duration 3660
-# Terminal 2, from this same directory:
-sudo .venv/bin/python -u m196_driver.py --event-socket "$PWD/pointer.sock" --duration 3600
-```
-
-Pointer output requires macOS Accessibility permission for the normal user's Python
-host. The root Bluetooth process forwards reports to the normal user's helper over
-a local Unix socket restricted to its owner. Running pointer output directly as root
-can be denied by macOS even when the normal user has permission. The default session
-lasts 300 seconds; change with `--duration 3600`. Ctrl-C stops it. Saved host identity
-and bonding keys are local files created with owner-only permissions.
-
-To request the Accessibility permission prompt explicitly:
-
-```sh
-.venv/bin/python m196_driver.py --request-accessibility
-```
-
-First hardware test: direct USB scan, encrypted pairing, HID discovery and live
-relative motion decoding succeeded with the M196 (report ID 3, six-byte payload).
-End-to-end pointer output through the unprivileged helper was verified with a
-five-pixel injection check and confirmed by the user moving the physical mouse.
-
-The adapter is exclusively occupied while the driver runs; AirPods and other macOS
-Bluetooth devices on that adapter cannot use it concurrently. Cleanup resets the
-controller and releases USB ownership. If macOS does not reclaim it, unplug and
-replug the adapter.
-
-## Validation
+## Development checks
 
 ```sh
 .venv/bin/python -m unittest -v test_hid_mouse.py test_hid_keyboard.py test_gui_backend.py
 .venv/bin/pip check
 ```
 
-Unit checks cover signed axes, bit-packed reports, report IDs, buttons, scrolling,
-absolute-axis exclusion, and malformed/truncated input. Hardware pairing and
-pointer output must also be verified; passing parser tests does not establish
-that the mouse works end to end.
+The current suite contains 17 tests covering HID parsing and backend behavior. Passing these tests does not establish hardware compatibility, Accessibility authorization, audio playback, or USB recovery on another Mac.
 
-Dependencies: Bumble 0.0.219, cryptography 46.0.3 (compatible binary wheel for the
-installed Python 3.9), and Bumble's resolved dependencies in requirements-lock.txt.
-Bumble: https://github.com/google/bumble (Apache-2.0).
+## Local data and privacy
+
+Host identity, Bluetooth bonding keys, saved device preferences, logs, and signing material stay outside Git through `.gitignore`. Do not upload `.signing/`, `driver-identity.json`, `driver-bonds*.json`, or `saved-devices.json`. Review diagnostic output before sharing: scans and logs can contain device names, addresses, and input report data. Keyboard keypress contents are not written to the normal activity or driver logs.
+
+## Dependencies and licensing
+
+Bluetooth functionality uses [Google Bumble](https://github.com/google/bumble), pinned to `0.0.219`; the full Python environment is in [requirements-lock.txt](requirements-lock.txt). Experimental audio encoding uses FFmpeg through `imageio-ffmpeg`.
+
+Bundled Atheros firmware retains its [vendor license](firmware/LICENCE.atheros_firmware), with origin URLs and SHA-256 hashes in [firmware/manifest.json](firmware/manifest.json). Those terms apply to the firmware. This repository does not currently declare a license for its original source code.
