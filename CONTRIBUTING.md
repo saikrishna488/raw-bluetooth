@@ -9,7 +9,9 @@ Follow the [README quick start](README.md#quick-start). Python dependencies belo
 ## Validation
 
 ```sh
-.venv/bin/python -m unittest -v test_hid_mouse.py test_hid_keyboard.py test_gui_backend.py
+.venv/bin/python -m unittest -v test_hid_mouse.py test_hid_keyboard.py test_gui_backend.py test_pointer.py
+xcrun swiftc -parse-as-library gui/PointerServer.swift gui/KeyboardOutput.swift gui/test_pointer_bounds.swift -o /tmp/raw-bt-pointer-bounds-tests -framework AppKit
+/tmp/raw-bt-pointer-bounds-tests
 .venv/bin/pip check
 git diff --check
 ```

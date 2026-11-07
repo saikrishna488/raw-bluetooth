@@ -28,6 +28,8 @@ The GUI renews a heartbeat. The worker stops after a lease expires if the GUI cr
 
 Mouse parsing honors report IDs, signed/bit-packed values, relative movement, buttons, and wheels. Absolute axes are excluded from pointer forwarding. Keyboard parsing covers standard key arrays, NKRO bitmaps, modifiers, and common consumer/media usages. The native output implementation handles keyboard repeat.
 
+Both pointer output paths clamp movement and click positions to the nearest active display in CoreGraphics coordinates. They use individual display rectangles to handle negative origins and gaps between monitors. Movement beyond a display edge is discarded; posted movement deltas reflect the distance actually traveled. The GUI also clears fractional movement on clipped axes so reversing direction responds without accumulated off-screen motion.
+
 The CLI uses `pointer_bridge.py` and `pointer.py` instead of the native GUI output path. The Bluetooth process can run as root while the pointer helper stays in the desktop user's session.
 
 Input socket delivery retries temporary macOS datagram buffer exhaustion in order, without marking the output helper permanently disconnected. Connection cleanup still disconnects the Bluetooth peer if releasing input state fails.

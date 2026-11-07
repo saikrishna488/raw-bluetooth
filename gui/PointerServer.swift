@@ -2,6 +2,29 @@ import AppKit
 import ApplicationServices
 import Darwin
 
+/// Clamp to actual displays, including layouts with gaps or negative origins.
+enum PointerBounds {
+    static func clamp(_ point: CGPoint, to displays: [CGRect]) -> CGPoint {
+        var closest = point
+        var distance = CGFloat.infinity
+        for bounds in displays where bounds.width >= 1 && bounds.height >= 1 {
+            let candidate = CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX - 1),
+                                    y: min(max(point.y, bounds.minY), bounds.maxY - 1))
+            let squared = pow(candidate.x - point.x, 2) + pow(candidate.y - point.y, 2)
+            if squared < distance { closest = candidate; distance = squared }
+        }
+        return closest
+    }
+
+    static func displays() -> [CGRect] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+}
+
 /// Unprivileged native pointer output. The USB worker sends decoded HID reports.
 final class PointerServer {
     private let descriptor: Int32
@@ -123,14 +146,19 @@ final class PointerServer {
         let dy = Int64(rawY.rounded(.toNearestOrAwayFromZero))
         movementRemainderX = rawX - CGFloat(dx)
         movementRemainderY = rawY - CGFloat(dy)
-        point.x += CGFloat(dx)
-        point.y += CGFloat(dy)
+        let displays = PointerBounds.displays()
+        let origin = PointerBounds.clamp(point, to: displays)
+        let proposed = CGPoint(x: origin.x + CGFloat(dx), y: origin.y + CGFloat(dy))
+        point = PointerBounds.clamp(proposed, to: displays)
+        // Discard movement beyond an edge so reversal responds immediately.
+        if point.x != proposed.x { movementRemainderX = 0 }
+        if point.y != proposed.y { movementRemainderY = 0 }
         if dx != 0 || dy != 0 {
             let button = buttons.firstIndex(of: true)
             let type: CGEventType = button == nil ? .mouseMoved : button == 0 ? .leftMouseDragged : button == 1 ? .rightMouseDragged : .otherMouseDragged
             let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: CGMouseButton(rawValue: UInt32(button ?? 0)) ?? .left)
-            event?.setIntegerValueField(.mouseEventDeltaX, value: dx)
-            event?.setIntegerValueField(.mouseEventDeltaY, value: dy)
+            event?.setIntegerValueField(.mouseEventDeltaX, value: Int64((point.x - origin.x).rounded()))
+            event?.setIntegerValueField(.mouseEventDeltaY, value: Int64((point.y - origin.y).rounded()))
             event?.flags.formUnion(keyboard.flags)
             event?.post(tap: .cghidEventTap)
         }

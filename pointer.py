@@ -6,6 +6,22 @@ class Point(C.Structure):
     _fields_ = [('x', C.c_double), ('y', C.c_double)]
 
 
+class Size(C.Structure):
+    _fields_ = [('width', C.c_double), ('height', C.c_double)]
+
+
+class Rect(C.Structure):
+    _fields_ = [('origin', Point), ('size', Size)]
+
+
+def clamp_pointer(x, y, displays):
+    candidates = [(min(max(x, left), left + width - 1),
+                   min(max(y, top), top + height - 1))
+                  for left, top, width, height in displays if width >= 1 and height >= 1]
+    return min(candidates, key=lambda point: (point[0] - x) ** 2 + (point[1] - y) ** 2,
+               default=(x, y))
+
+
 def request_accessibility():
     ax = C.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
     cf = C.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
@@ -42,6 +58,10 @@ class Pointer:
         self.cf.CFRelease.argtypes = [C.c_void_p]
         self.cg.CGEventCreateScrollWheelEvent.argtypes = [C.c_void_p, C.c_uint32, C.c_uint32, C.c_int32, C.c_int32]
         self.cg.CGEventCreateScrollWheelEvent.restype = C.c_void_p
+        self.cg.CGGetActiveDisplayList.argtypes = [C.c_uint32, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32)]
+        self.cg.CGGetActiveDisplayList.restype = C.c_int32
+        self.cg.CGDisplayBounds.argtypes = [C.c_uint32]
+        self.cg.CGDisplayBounds.restype = Rect
         self.buttons = [False] * 8
 
     def post(self, event):
@@ -52,6 +72,16 @@ class Pointer:
         finally:
             self.cf.CFRelease(event)
 
+    def displays(self):
+        count = C.c_uint32()
+        if self.cg.CGGetActiveDisplayList(0, None, C.byref(count)) or not count.value:
+            return []
+        ids = (C.c_uint32 * count.value)()
+        if self.cg.CGGetActiveDisplayList(count.value, ids, C.byref(count)):
+            return []
+        bounds = [self.cg.CGDisplayBounds(display) for display in ids[:count.value]]
+        return [(rect.origin.x, rect.origin.y, rect.size.width, rect.size.height) for rect in bounds]
+
     def apply(self, report):
         current = self.cg.CGEventCreate(None)
         if not current:
@@ -61,15 +91,17 @@ class Pointer:
         finally:
             self.cf.CFRelease(current)
         dx, dy = report.get('x', 0), report.get('y', 0)
-        pos.x += dx
-        pos.y += dy
+        displays = self.displays()
+        origin_x, origin_y = clamp_pointer(pos.x, pos.y, displays)
+        pos.x, pos.y = clamp_pointer(origin_x + dx, origin_y + dy, displays)
+        actual_dx, actual_dy = round(pos.x - origin_x), round(pos.y - origin_y)
         if dx or dy:
             button = next((i for i, down in enumerate(self.buttons) if down), 0)
             event_type = (6 if button == 0 else 7 if button == 1 else 27) if any(self.buttons) else 5
             event = self.cg.CGEventCreateMouseEvent(None, event_type, pos, button)
             if event:
-                self.cg.CGEventSetIntegerValueField(event, 4, dx)
-                self.cg.CGEventSetIntegerValueField(event, 5, dy)
+                self.cg.CGEventSetIntegerValueField(event, 4, actual_dx)
+                self.cg.CGEventSetIntegerValueField(event, 5, actual_dy)
             self.post(event)
         for index in range(8):
             down = report.get(f'button{index + 1}', self.buttons[index])

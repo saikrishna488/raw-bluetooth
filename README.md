@@ -1,6 +1,6 @@
 # Raw Bluetooth for macOS
 
-Current version: **0.3.2** (build 5).
+Current version: **0.3.3** (build 6).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
