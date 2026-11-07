@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Foundation
 import ApplicationServices
+import ServiceManagement
 
 struct NearbyDevice: Identifiable {
     var address: String
@@ -56,6 +57,34 @@ final class BluetoothModel: ObservableObject {
             pointer?.setScrollSensitivity(scrollSensitivity)
         }
     }
+    @Published var runInBackground = UserDefaults.standard.object(forKey: "runInBackground") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(runInBackground, forKey: "runInBackground") }
+    }
+    @Published var startHidden = UserDefaults.standard.bool(forKey: "startHidden") {
+        didSet { UserDefaults.standard.set(startHidden, forKey: "startHidden") }
+    }
+    @Published var connectOnLaunch = UserDefaults.standard.object(forKey: "connectOnLaunch") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(connectOnLaunch, forKey: "connectOnLaunch") }
+    }
+    @Published var loginEnabled = SMAppService.mainApp.status == .enabled
+    @Published var loginNeedsApproval = SMAppService.mainApp.status == .requiresApproval
+    @Published var loginError: String?
+
+    func refreshLoginStatus() {
+        loginEnabled = SMAppService.mainApp.status == .enabled
+        loginNeedsApproval = SMAppService.mainApp.status == .requiresApproval
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        guard !preview else { return }
+        loginError = nil
+        do {
+            if enabled { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+        } catch { loginError = error.localizedDescription }
+        refreshLoginStatus()
+    }
+
     var backend: Process?
     var pointer: PointerServer?
     var session: URL?
@@ -379,6 +408,7 @@ let muted = Color(red: 0.60, green: 0.65, blue: 0.73)
 
 struct AppView: View {
     @ObservedObject var model: BluetoothModel
+    @State var showSettings = false
     @State var diagnostics = false
     @State var keyboardTest = ""
     var body: some View {
@@ -397,6 +427,7 @@ struct AppView: View {
         .background(ink)
         .preferredColorScheme(.dark)
         .frame(minWidth: 980, minHeight: 650)
+        .sheet(isPresented: $showSettings) { SettingsView(model: model) }
         .alert("Connection needs attention", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
             Button("Accessibility Settings") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!) }
@@ -412,6 +443,9 @@ struct AppView: View {
                 Text("A direct connection to your devices.").font(.system(size: 12)).foregroundStyle(muted)
             }
             Spacer()
+            Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                .buttonStyle(.plain).font(.system(size: 18)).foregroundStyle(muted)
+                .accessibilityLabel("Settings")
             HStack(spacing: 7) {
                 Circle().fill(model.connectedAddress != nil ? accent : model.scanning ? Color.blue : muted).frame(width: 7, height: 7)
                 Text(model.status).font(.system(size: 12)).foregroundStyle(muted)
@@ -647,13 +681,64 @@ struct AppView: View {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+struct SettingsView: View {
+    @ObservedObject var model: BluetoothModel
+    var onDone: (() -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("Settings").font(.title2.bold())
+                Spacer()
+                Button("Done") { if let onDone = onDone { onDone() } else { dismiss() } }.keyboardShortcut(.defaultAction)
+            }
+            GroupBox("Startup") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Launch at login", isOn: Binding(get: { model.loginEnabled || model.loginNeedsApproval }, set: model.setLaunchAtLogin))
+                        .disabled(model.preview)
+                    if model.loginNeedsApproval {
+                        Text("Allow Raw Bluetooth in System Settings → General → Login Items.").font(.caption)
+                    }
+                    if let error = model.loginError { Text(error).font(.caption).foregroundStyle(.red) }
+                    Button("Open Login Items Settings") { SMAppService.openSystemSettingsLoginItems() }
+                    Toggle("Start with the window hidden", isOn: $model.startHidden)
+                    Toggle("Connect saved devices on launch", isOn: $model.connectOnLaunch)
+                    Text("Adapter access may ask for an administrator password when a new session starts.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(8)
+            }
+            GroupBox("Background") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Keep running when the window closes", isOn: $model.runInBackground)
+                    Text("Your devices stay connected. Use the Bluetooth menu bar icon to reopen the window, release the adapter, or quit. Quit always stops the session.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(8)
+            }
+            GroupBox("Administrator access") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(model.active && model.phase != "starting" ? "Adapter session active" : "Authorization required for a new session", systemImage: "lock.shield")
+                    Text("This build requests administrator access each time it starts the USB worker. Keeping it running in the background keeps that session available. Always-allowed access requires a separately installed, approved privileged helper; it is not available in this build. Your password is never stored.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(8)
+            }
+        }.padding(24).frame(width: 520).preferredColorScheme(.dark)
+            .onAppear { model.refreshLoginStatus() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshLoginStatus() }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    var statusItem: NSStatusItem!
+    var settingsWindow: NSWindow?
     var window: NSWindow!
     let model = BluetoothModel()
     func applicationDidFinishLaunching(_ notification: Notification) {
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        let settingsItem = appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Raw Bluetooth", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)
@@ -666,20 +751,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(editItem)
         NSApplication.shared.mainMenu = menu
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.delegate = self
+        window.isReleasedWhenClosed = false
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.button?.image = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "Raw Bluetooth")
+        let statusMenu = NSMenu()
+        for (title, action) in [("Open Raw Bluetooth", #selector(openWindow)), ("Settings…", #selector(openSettings)), ("Release adapter", #selector(releaseAdapter))] {
+            let item = statusMenu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+        }
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "Quit Raw Bluetooth", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        statusItem.menu = statusMenu
         window.title = "Raw Bluetooth"
         window.titlebarAppearsTransparent = true
         window.backgroundColor = NSColor(red: 0.07, green: 0.09, blue: 0.13, alpha: 1)
         window.contentView = NSHostingView(rootView: AppView(model: model))
         window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        if !model.preview && (CommandLine.arguments.contains("--scan") || model.savedDevices.values.contains(true)) {
+        if !model.startHidden || model.preview || CommandLine.arguments.contains("--snapshot") {
+            openWindow()
+        }
+        if !model.preview && (CommandLine.arguments.contains("--scan") || (model.connectOnLaunch && model.savedDevices.values.contains(true))) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.model.start() }
         }
+        if model.preview && CommandLine.arguments.contains("--settings") { openSettings() }
         if let index = CommandLine.arguments.firstIndex(of: "--snapshot"), index + 1 < CommandLine.arguments.count {
             let path = CommandLine.arguments[index + 1]
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                guard let view = self.window.contentView,
+                guard let view = (self.settingsWindow ?? self.window)?.contentView,
                       let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
                 view.cacheDisplay(in: view.bounds, to: bitmap)
                 if let png = bitmap.representation(using: .png, properties: [:]) {
@@ -688,7 +788,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    @objc func openWindow() {
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+    @objc func openSettings() {
+        if settingsWindow == nil {
+            let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 568, height: 560), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            settings.appearance = NSAppearance(named: .darkAqua)
+            settings.title = "Raw Bluetooth Settings"
+            settings.isReleasedWhenClosed = false
+            settings.contentView = NSHostingView(rootView: SettingsView(model: model, onDone: { [weak self] in self?.settingsWindow?.orderOut(nil) }))
+            settings.center()
+            settingsWindow = settings
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+    @objc func releaseAdapter() { model.stop() }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if model.runInBackground {
+            sender.orderOut(nil)
+        } else {
+            NSApplication.shared.terminate(nil)
+        }
+        return false
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openWindow()
+        return true
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !model.runInBackground }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard model.active else { return .terminateNow }
         model.stop()

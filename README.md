@@ -65,6 +65,19 @@ The build installs the app in `~/Applications` and creates a private local devel
 
 For an M196, hold its bottom pairing button for about three seconds until blinking. For a K250, hold its Bluetooth button until blinking. Pairing may take up to two minutes.
 
+## Settings and background operation
+
+Open **Settings** with the gear button, the app menu (⌘,), or the menu bar icon.
+
+- **Launch at login** registers Raw Bluetooth with macOS Login Items. If macOS requires approval, open Login Items Settings from this page.
+- **Start with the window hidden** opens the app without its main window. The menu bar icon remains available.
+- **Connect saved devices on launch** starts an adapter session for devices with automatic reconnection enabled. Starting a new session may display an administrator prompt.
+- **Keep running when the window closes** keeps device input and the authorized worker running after closing the main window. This defaults to on. Reopen from the menu bar icon or Dock. Turn it off to quit when closing the main window.
+
+**Quit Raw Bluetooth** stops the worker and releases the adapter. Background operation requires a logged-in user; it does not provide login-screen input or operation after logout.
+
+This build does not offer permanent administrator authorization. It requests authorization when launching its USB worker and never stores your password. A persistent privileged service would require a separately packaged and approved helper. Keeping the app running avoids restarting the worker just to close and reopen its window.
+
 ## Documentation
 
 - [User guide and command-line reference](docs/USAGE.md)

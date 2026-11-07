@@ -1,9 +1,12 @@
 import json
 import asyncio
+import errno
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
+from m196_driver import SocketPointer
 from bumble.core import AdvertisingData
 from gui_backend import advertisement_info, read_command, Backend, DisplayPasskey
 
@@ -50,6 +53,45 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_input_sender_recovers_from_temporary_socket_congestion(self):
+        sender = SocketPointer.__new__(SocketPointer)
+        sender.sock = object()
+        sender.queue = asyncio.Queue()
+        sender.failure = None
+        send = AsyncMock(side_effect=[OSError(errno.ENOBUFS, 'full'), None, None])
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, 'sock_sendall', send):
+            task = asyncio.create_task(sender.send_reports())
+            try:
+                sender.apply({'x': 1})
+                sender.apply({'x': 2})
+                await asyncio.wait_for(sender.queue.join(), 1)
+                self.assertIsNone(sender.failure)
+                self.assertEqual(send.await_count, 3)
+                packets = [call.args[1] for call in send.await_args_list]
+                self.assertEqual(packets[0], packets[1])
+                self.assertEqual(json.loads(packets[2]), {'x': 2})
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_input_sender_reports_a_dead_socket(self):
+        sender = SocketPointer.__new__(SocketPointer)
+        sender.sock = object()
+        sender.queue = asyncio.Queue()
+        sender.failure = None
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, 'sock_sendall', AsyncMock(side_effect=ConnectionRefusedError())):
+            task = asyncio.create_task(sender.send_reports())
+            try:
+                sender.apply({'x': 1})
+                await asyncio.wait_for(sender.queue.join(), 1)
+                with self.assertRaisesRegex(RuntimeError, 'Pointer helper disconnected'):
+                    sender.apply({'x': 2})
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_disconnect_keyboard_keeps_mouse_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             backend = Backend(Path(tmp), 'test', saved_path=Path(tmp) / 'saved.json')

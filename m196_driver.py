@@ -1,6 +1,7 @@
 """Experimental Logitech M196 USB-HCI -> BLE HID -> macOS pointer driver."""
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -34,7 +35,16 @@ class SocketPointer:
         while True:
             data = await self.queue.get()
             try:
-                await asyncio.get_running_loop().sock_sendall(self.sock, data)
+                while True:
+                    try:
+                        await asyncio.get_running_loop().sock_sendall(self.sock, data)
+                        break
+                    except OSError as exc:
+                        # macOS can report ENOBUFS for a full Unix datagram
+                        # receive buffer. It is backpressure, not a dead peer.
+                        if exc.errno not in (errno.ENOBUFS, errno.EAGAIN, errno.EWOULDBLOCK):
+                            raise
+                        await asyncio.sleep(0.005)
             except Exception as exc:
                 self.failure = exc
             finally:
@@ -193,7 +203,10 @@ async def use_mouse(device, address, args, pointer, observer=None):
         notify('disconnected', reports=count)
     finally:
         if pointer:
-            pointer.release()
+            try:
+                pointer.release()
+            except Exception:
+                logging.exception('Input release failed')
         if not disconnected.is_set():
             try:
                 await asyncio.wait_for(connection.disconnect(), 5)
