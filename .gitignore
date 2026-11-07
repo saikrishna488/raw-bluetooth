@@ -1,0 +1,17 @@
+.venv/
+.signing/
+__pycache__/
+*.py[cod]
+*.app/
+ble-scan
+.DS_Store
+*.hex
+*.plist~
+driver-identity.json
+driver-bonds.json
+driver-bonds.pre-dual-adapter.json
+saved-devices.json
+driver.stop
+*.log
+*.sock
+pointer.ready
