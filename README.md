@@ -1,6 +1,6 @@
 # Raw Bluetooth for macOS
 
-Current version: **0.3.1** (build 4).
+Current version: **0.3.2** (build 5).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
@@ -78,6 +78,7 @@ Open **Settings** with the gear button, the app menu (⌘,), or the menu bar ico
 - **Start with the window hidden** opens the app without its main window. The menu bar icon remains available.
 - **Connect saved devices on launch** starts an adapter session for devices with automatic reconnection enabled. Starting a new session may display an administrator prompt.
 - **Keep running when the window closes** keeps device input and the authorized worker running after closing the main window. This defaults to on. Reopen from the menu bar icon or Dock. Turn it off to quit when closing the main window.
+- **Scroll page length**, under **Settings → Scrolling**, sets 1–30 lines per vertical wheel step. It combines with the sidebar's Scroll Speed, applies immediately to all connected mice, and is saved across launches. The default is 1 line; applications control the actual height of a line. Horizontal scrolling keeps its existing speed.
 
 **Quit Raw Bluetooth** stops the worker and releases the adapter. Background operation requires a logged-in user; it does not provide login-screen input or operation after logout.
 

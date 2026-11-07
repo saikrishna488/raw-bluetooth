@@ -13,6 +13,7 @@ final class PointerServer {
     private var sensitivity: CGFloat
     private var movementRemainderX: CGFloat = 0
     private var movementRemainderY: CGFloat = 0
+    private var scrollPageLength: CGFloat
     private var scrollSensitivity: CGFloat
     private var scrollRemainderX: CGFloat = 0
     private var scrollRemainderY: CGFloat = 0
@@ -22,8 +23,9 @@ final class PointerServer {
     private var clickPositions = [CGPoint](repeating: .zero, count: 8)
     private var clickCounts = [Int64](repeating: 1, count: 8)
 
-    init(path: String, sensitivity: Double = 1.0, scrollSensitivity: Double = 1.0) throws {
+    init(path: String, sensitivity: Double = 1.0, scrollSensitivity: Double = 1.0, scrollPageLength: Double = 1.0) throws {
         guard AXIsProcessTrusted() else { throw NSError(domain: "RawBluetooth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Allow Raw Bluetooth in Accessibility to enable mouse control."]) }
+        self.scrollPageLength = CGFloat(min(30, max(1, scrollPageLength)))
         self.path = path
         self.sensitivity = CGFloat(min(4.0, max(0.5, sensitivity)))
         self.scrollSensitivity = CGFloat(min(4.0, max(0.5, scrollSensitivity)))
@@ -87,6 +89,13 @@ final class PointerServer {
         }
     }
 
+    func setScrollPageLength(_ value: Double) {
+        queue.async {
+            self.scrollPageLength = CGFloat(min(30, max(1, value)))
+            self.scrollRemainderY = 0
+        }
+    }
+
     private func apply(_ report: [String: Any]) {
         let device = report["device"] as? String ?? "default"
         if report["kind"] as? String == "keyboard" {
@@ -141,7 +150,7 @@ final class PointerServer {
             event?.post(tap: .cghidEventTap)
             buttons[index] = down
         }
-        let rawWheel = CGFloat(amount(report, "wheel")) * scrollSensitivity + scrollRemainderY
+        let rawWheel = CGFloat(amount(report, "wheel")) * scrollSensitivity * scrollPageLength + scrollRemainderY
         let rawPan = CGFloat(amount(report, "pan")) * scrollSensitivity + scrollRemainderX
         let wheel = Int64(rawWheel.rounded(.toNearestOrAwayFromZero))
         let pan = Int64(rawPan.rounded(.toNearestOrAwayFromZero))

@@ -57,6 +57,12 @@ final class BluetoothModel: ObservableObject {
             pointer?.setScrollSensitivity(scrollSensitivity)
         }
     }
+    @Published var scrollPageLength: Double = min(30, max(1, UserDefaults.standard.object(forKey: "scrollPageLength") as? Double ?? 1)) {
+        didSet {
+            UserDefaults.standard.set(scrollPageLength, forKey: "scrollPageLength")
+            pointer?.setScrollPageLength(scrollPageLength)
+        }
+    }
     @Published var runInBackground = UserDefaults.standard.object(forKey: "runInBackground") as? Bool ?? true {
         didSet { UserDefaults.standard.set(runInBackground, forKey: "runInBackground") }
     }
@@ -176,7 +182,7 @@ final class BluetoothModel: ObservableObject {
             stopping = false
             try Data().write(to: folder.appendingPathComponent("heartbeat"))
             if AXIsProcessTrusted() && savedDevices.values.contains(true) {
-                pointer = try PointerServer(path: folder.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity)
+                pointer = try PointerServer(path: folder.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity, scrollPageLength: scrollPageLength)
             }
             FileManager.default.createFile(atPath: folder.appendingPathComponent("backend.log").path, contents: nil)
             let python = source.appendingPathComponent(".venv/bin/python").path
@@ -246,7 +252,7 @@ final class BluetoothModel: ObservableObject {
         do {
             if pointer == nil {
                 guard let session = session else { return }
-                pointer = try PointerServer(path: session.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity)
+                pointer = try PointerServer(path: session.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity, scrollPageLength: scrollPageLength)
             }
             phase = "connecting"
             pendingAddress = device.address
@@ -287,7 +293,7 @@ final class BluetoothModel: ObservableObject {
         pointerAllowed = AXIsProcessTrusted()
         guard let session = session, active else { return }
         if pointerAllowed && pointer == nil && savedDevices.values.contains(true) && !stopping {
-            do { pointer = try PointerServer(path: session.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity) }
+            do { pointer = try PointerServer(path: session.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity, scrollPageLength: scrollPageLength) }
             catch { log("Input server could not start: \(error.localizedDescription)") }
         }
         heartbeatCounter += 1
@@ -704,6 +710,20 @@ struct SettingsView: View {
                     Toggle("Start with the window hidden", isOn: $model.startHidden)
                     Toggle("Connect saved devices on launch", isOn: $model.connectOnLaunch)
                     Text("Adapter access may ask for an administrator password when a new session starts.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(8)
+            }
+            GroupBox("Scrolling") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Scroll page length")
+                        Spacer()
+                        Text("\(Int(model.scrollPageLength)) line\(Int(model.scrollPageLength) == 1 ? "" : "s") / step")
+                            .monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    Slider(value: $model.scrollPageLength, in: 1...30, step: 1)
+                        .accessibilityLabel("Scroll page length in lines per wheel step")
+                    Text("Sets the vertical distance per wheel step, multiplied by Scroll Speed. Apps determine the height of each line. Applies immediately to all connected mice.")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(8)
             }
