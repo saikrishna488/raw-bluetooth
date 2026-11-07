@@ -1,0 +1,17 @@
+{
+  "ar3k/AthrBT_0x31010100.dfu": {
+    "source": "https://chromium.googlesource.com/chromiumos/third_party/linux-firmware/+/refs/heads/master/ar3k/AthrBT_0x31010100.dfu?format=TEXT",
+    "sha256": "d0e20e32c84b42684829743475a53225e7116089393ac4c4970be136b8f3a2f6",
+    "bytes": 37796
+  },
+  "ar3k/ramps_0x31010100_40.dfu": {
+    "source": "https://chromium.googlesource.com/chromiumos/third_party/linux-firmware/+/refs/heads/master/ar3k/ramps_0x31010100_40.dfu?format=TEXT",
+    "sha256": "a2f99c2d9565d55040c6956427d0662911c6c9dd6f12965f1470169b75b274ae",
+    "bytes": 1922
+  },
+  "LICENCE.atheros_firmware": {
+    "source": "https://chromium.googlesource.com/chromiumos/third_party/linux-firmware/+/refs/heads/master/LICENCE.atheros_firmware?format=TEXT",
+    "sha256": "802b7014b26c606cf6248ae8b0ab1ce6d2d1b0db236d38dd269e676cd70710f2",
+    "bytes": 1946
+  }
+}
