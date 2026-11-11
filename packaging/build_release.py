@@ -31,6 +31,7 @@ def main():
     version = info['CFBundleShortVersionString']
     BUILD.mkdir(parents=True, exist_ok=True)
     DIST.mkdir(exist_ok=True)
+    run(sys.executable, ROOT / 'native/build.py')
     ffmpeg, ffmpeg_source = build_ffmpeg(BUILD / 'vendor')
     app = BUILD / 'image/Raw Bluetooth.app'
     if app.parent.exists():
@@ -48,6 +49,7 @@ def main():
         '--collect-all', 'bumble', '--collect-all', 'libusb_package',
         '--exclude-module', 'imageio_ffmpeg', '--add-binary', f'{ffmpeg}:.',
         '--copy-metadata', 'bumble',
+        '--hidden-import', '_hid_native', '--hidden-import', 'native_hid',
         '--hidden-import', 'gui_backend', ROOT / 'packaging/backend_entry.py')
     helpers = app / 'Contents/Helpers'
     helpers.mkdir()
@@ -87,9 +89,9 @@ def main():
     (notices / 'dependencies.json').write_text(json.dumps(records, indent=2))
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', app.parent / 'READ ME FIRST.txt')
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', resources / 'INSTALL.txt')
-    run('xcrun', 'swiftc', '-parse-as-library', 'gui/RawBluetooth.swift',
-        'gui/PointerServer.swift', 'gui/KeyboardOutput.swift', '-o', macos / 'RawBluetooth',
-        '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'ServiceManagement',
+    run('xcrun', 'swiftc', '-O', '-parse-as-library', 'gui/RawBluetooth.swift',
+        'gui/PointerServer.swift', 'gui/KeyboardOutput.swift', 'gui/SystemAudioCapture.swift', '-o', macos / 'RawBluetooth',
+        '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
         '-target', 'x86_64-apple-macosx13.0')
     identity = os.environ.get('RAW_BT_SIGN_IDENTITY', '-')
     # Deep ad-hoc signing is for the unsigned preview. Developer ID distribution

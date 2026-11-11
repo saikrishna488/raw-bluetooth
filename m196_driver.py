@@ -15,8 +15,7 @@ from bumble.core import AdvertisingData, UUID
 from bumble.device import Device, DeviceConfiguration, Peer
 from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.transport import open_transport
-from hid_mouse import MouseReports
-from hid_keyboard import KeyboardReports
+from hid_backend import MouseReports, KeyboardReports
 from pointer import Pointer, request_accessibility
 
 from runtime_paths import data_directory

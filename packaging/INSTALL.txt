@@ -1,4 +1,4 @@
-Raw Bluetooth 0.4.0 — experimental Intel macOS app
+Raw Bluetooth 0.5.0 — experimental Intel macOS app
 
 1. Drag Raw Bluetooth.app to Applications. Eject this disk image.
 2. Open the app from Applications.
@@ -15,7 +15,8 @@ No Python installation or source checkout is needed. Requires an Intel Mac,
 macOS 13 or later, a logged-in desktop session, and a supported external USB
 Bluetooth adapter. The tested adapter is USB 0a12:0001. Other adapters and
 macOS versions need independent hardware testing. Classic Bluetooth HID,
-login-screen input, system audio output and microphones are not supported.
+login-screen input and microphones are not supported. System audio routing
+is experimental and requires Screen & System Audio Recording permission.
 
 Quit Raw Bluetooth before replacing or removing the app. Closing the window
 keeps it running by default; use the menu bar icon to quit or release USB.
@@ -30,5 +31,5 @@ https://github.com/saikrishna488/raw-bluetooth
 
 Third-party notices and firmware provenance are inside the application's
 Contents/Resources directory. The default external USB path does not load
-onboard Atheros firmware. Audio remains an experimental test-tone feature;
+onboard Atheros firmware. System audio routing remains experimental;
 this is not a replacement for macOS Bluetooth services.

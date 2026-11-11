@@ -11,10 +11,10 @@ from bumble.core import AdvertisingData
 from gui_backend import advertisement_info, read_command, Backend, DisplayPasskey, DeviceOutput
 
 
-def advertisement(data, connectable=True):
+def advertisement(data, connectable=True, scan_response=False):
     return SimpleNamespace(address='00:11:22:33:44:55', data_bytes=data,
                            data=AdvertisingData.from_bytes(data), rssi=-39,
-                           is_connectable=connectable)
+                           is_connectable=connectable, is_scan_response=scan_response)
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -25,9 +25,11 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(info['category'], 'Mouse')
         self.assertTrue(info['connectable'])
         # A scan response without a name must preserve the named device row.
-        followup = advertisement_info(advertisement(bytes.fromhex('02010503031218'), False), info)
+        followup = advertisement_info(advertisement(bytes.fromhex('02010503031218'), False, scan_response=True), info)
         self.assertEqual(followup['name'], 'Logi M196')
         self.assertTrue(followup['connectable'])
+        broadcast = advertisement_info(advertisement(bytes.fromhex('02010503031218'), False), info)
+        self.assertFalse(broadcast['connectable'])
 
     def test_keyboard_and_broadcast(self):
         info = advertisement_info(advertisement(bytes.fromhex('0319c103'), False))

@@ -3,6 +3,7 @@ import SwiftUI
 import Foundation
 import ApplicationServices
 import ServiceManagement
+import UniformTypeIdentifiers
 
 struct NearbyDevice: Identifiable {
     var address: String
@@ -99,6 +100,7 @@ final class BluetoothModel: ObservableObject {
     var pending = Data()
     var heartbeatTimer: DispatchSourceTimer?
     var sessionActivity: NSObjectProtocol?
+    var systemAudioCapture: SystemAudioCapture?
 
     func startHeartbeat(in folder: URL) {
         stopHeartbeat()
@@ -133,6 +135,7 @@ final class BluetoothModel: ObservableObject {
         dataDirectory = packagedWorker == nil ? source : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Raw Bluetooth")
         preview = CommandLine.arguments.contains("--preview")
         timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in self?.poll() }
+        timer?.tolerance = 0.1
         RunLoop.main.add(timer!, forMode: .common)
         if let data = try? Data(contentsOf: dataDirectory.appendingPathComponent("saved-devices.json")),
            let records = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
@@ -177,10 +180,11 @@ final class BluetoothModel: ObservableObject {
         try data.write(to: session.appendingPathComponent(name), options: .atomic)
     }
 
-    func command(_ action: String, address: String? = nil, enabled: Bool? = nil) {
+    func command(_ action: String, address: String? = nil, enabled: Bool? = nil, path: String? = nil) {
         var object: [String: Any] = ["id": UUID().uuidString, "action": action]
         if let address = address { object["address"] = address }
         if let enabled = enabled { object["enabled"] = enabled }
+        if let path = path { object["path"] = path }
         do { try write(object, to: "command.json") }
         catch { fail("Could not send command: \(error.localizedDescription)") }
     }
@@ -296,12 +300,54 @@ final class BluetoothModel: ObservableObject {
 
     func disconnect() { command("disconnect", address: selection ?? pendingAddress) }
     func connectAudio() {
-        guard let device = chosen, active, !stopping, device.category == "Audio" else { return }
+        guard let device = chosen, !stopping, device.category == "Audio",
+              audioPendingAddress == nil else { return }
+        guard active else { start(); return }
+        guard device.classicAvailable else {
+            status = "Searching for Bluetooth audio…"
+            scan()
+            return
+        }
+        guard let session else { return }
+        let fifo = session.appendingPathComponent("system-audio.fifo")
+        let capture = SystemAudioCapture(fifo: fifo)
+        systemAudioCapture = capture
+        audioPendingAddress = device.address
+        status = "Starting system audio route…"
+        Task {
+            do {
+                try await capture.start()
+                await MainActor.run {
+                    self.status = "Connecting system audio…"
+                    self.command("audio_system", address: device.address, path: fifo.path)
+                }
+            } catch {
+                await MainActor.run {
+                    capture.stop()
+                    self.systemAudioCapture = nil
+                    self.audioPendingAddress = nil
+                    self.fail("System audio capture failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    func playAudioFile() {
+        guard let device = chosen, active, !stopping, device.category == "Audio",
+              device.classicAvailable, audioPendingAddress == nil else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ["wav", "mp3", "flac", "m4a"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
         audioPendingAddress = device.address
         status = "Connecting to audio device…"
-        command("audio_test", address: device.address)
+        command("audio_play", address: device.address, path: url.path)
     }
-    func disconnectAudio() { command("audio_disconnect", address: selection) }
+    func disconnectAudio() {
+        systemAudioCapture?.stop()
+        systemAudioCapture = nil
+        command("audio_disconnect", address: selection)
+    }
     func forget(_ device: NearbyDevice) { command("forget", address: device.address) }
     func stop() {
         guard active else { return }
@@ -309,6 +355,31 @@ final class BluetoothModel: ObservableObject {
         status = "Releasing adapter…"
         phase = "stopping"
         command("stop")
+    }
+    func recoverAfterWake() {
+        guard !preview, !stopping else { return }
+        if active, let backend, backend.isRunning {
+            // Restart discovery so the backend sees fresh advertisements and
+            // can reconnect saved devices after their radios wake.
+            scan()
+        } else if active || backend != nil {
+            // The USB worker may have timed out while macOS was asleep. Reset
+            // its stale UI state so Start is available again.
+            stopHeartbeat()
+            backend = nil
+            active = false
+            scanning = false
+            connectedAddresses.removeAll()
+            audioAddresses.removeAll()
+            pendingAddress = nil
+            audioPendingAddress = nil
+            pairingCode = nil
+            stopping = false
+            status = "Restarting adapter after wake…"
+            start()
+        } else if connectOnLaunch && savedDevices.values.contains(true) {
+            start()
+        }
     }
     func stopPointer() {
         stopHeartbeat()
@@ -323,7 +394,8 @@ final class BluetoothModel: ObservableObject {
     }
 
     func poll() {
-        pointerAllowed = AXIsProcessTrusted()
+        let allowed = AXIsProcessTrusted()
+        if pointerAllowed != allowed { pointerAllowed = allowed }
         guard let session = session, active else { return }
         if pointerAllowed && pointer == nil && savedDevices.values.contains(true) && !stopping {
             do { pointer = try PointerServer(path: session.appendingPathComponent("pointer.sock").path, sensitivity: mouseSensitivity, scrollSensitivity: scrollSensitivity, scrollPageLength: scrollPageLength) }
@@ -348,6 +420,11 @@ final class BluetoothModel: ObservableObject {
 
     func receive(_ event: [String: Any]) {
         guard let state = event["state"] as? String else { return }
+        if state == "device_removed", let address = event["address"] as? String {
+            devices.removeValue(forKey: address)
+            if selection == address { selection = nil }
+            return
+        }
         if state == "saved", let address = event["address"] as? String {
             savedDevices[address] = event["auto_reconnect"] as? Bool ?? true
             return
@@ -361,6 +438,16 @@ final class BluetoothModel: ObservableObject {
         }
         if state == "device", let address = event["address"] as? String {
             let device = NearbyDevice(address: address, name: event["name"] as? String ?? "", rssi: event["rssi"] as? Int ?? -127, connectable: event["connectable"] as? Bool ?? false, classicAvailable: event["classic_available"] as? Bool ?? false, category: event["category"] as? String ?? "BLE device", lastSeen: Date(timeIntervalSince1970: event["last_seen"] as? Double ?? Date().timeIntervalSince1970))
+            // Scan timestamps change on every advertisement; only publish changes
+            // that affect the displayed row (including saved-to-discovered state).
+            if let previous = devices[address],
+               previous.name == device.name, previous.rssi == device.rssi,
+               previous.connectable == device.connectable,
+               previous.classicAvailable == device.classicAvailable,
+               previous.category == device.category,
+               (previous.lastSeen.timeIntervalSince1970 == 0) == (device.lastSeen.timeIntervalSince1970 == 0) {
+                return
+            }
             devices[address] = device
             if selection == nil && device.category == "Mouse" { selection = address }
             return
@@ -378,13 +465,17 @@ final class BluetoothModel: ObservableObject {
         if state == "audio_connected" {
             if let address = event["address"] as? String { audioAddresses.insert(address) }
             audioPendingAddress = nil
-            status = "Audio connected · test tone playing"
+            status = event["message"] as? String ?? "Audio connected"
             return
         }
         if state == "audio_disconnected" {
+            systemAudioCapture?.stop()
+            systemAudioCapture = nil
             if let address = event["address"] as? String { audioAddresses.remove(address) }
             audioPendingAddress = nil
-            status = connectedAddresses.isEmpty ? "Audio disconnected" : "Input devices connected"
+            if errorMessage == nil {
+                status = connectedAddresses.isEmpty ? "Audio disconnected" : "Input devices connected"
+            }
             return
         }
         if state == "audio_error" {
@@ -453,17 +544,17 @@ struct AppView: View {
             header
             Divider().overlay(Color.white.opacity(0.07))
             HStack(spacing: 0) {
-                sidebar.frame(width: 184)
+                sidebar.frame(width: 230)
                 Divider().overlay(Color.white.opacity(0.07))
-                deviceList.frame(minWidth: 310, idealWidth: 370)
+                deviceList.frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
                 Divider().overlay(Color.white.opacity(0.07))
-                details.frame(minWidth: 320, idealWidth: 390)
+                details.frame(width: 320)
             }
             footer
         }
         .background(ink)
         .preferredColorScheme(.dark)
-        .frame(minWidth: 980, minHeight: 650)
+        .frame(minWidth: 960, minHeight: 600)
         .sheet(isPresented: $showSettings) { SettingsView(model: model) }
         .alert("Connection needs attention", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
@@ -484,8 +575,8 @@ struct AppView: View {
                 .buttonStyle(.plain).font(.system(size: 18)).foregroundStyle(muted)
                 .accessibilityLabel("Settings")
             HStack(spacing: 7) {
-                Circle().fill(model.connectedAddress != nil ? accent : model.scanning ? Color.blue : muted).frame(width: 7, height: 7)
-                Text(model.status).font(.system(size: 12)).foregroundStyle(muted)
+                Circle().fill((!model.connectedAddresses.isEmpty || !model.audioAddresses.isEmpty) ? accent : model.scanning ? Color.blue : muted).frame(width: 7, height: 7)
+                Text(model.status).font(.system(size: 12)).foregroundStyle(muted).lineLimit(2)
             }.padding(.horizontal, 13).padding(.vertical, 9).background(Color.white.opacity(0.04), in: Capsule())
             Button { model.scanning ? model.pause() : model.scan() } label: {
                 Label(model.scanning ? "Pause scan" : "Scan devices", systemImage: model.scanning ? "pause.fill" : "arrow.clockwise")
@@ -498,14 +589,17 @@ struct AppView: View {
         }.padding(.horizontal, 25).padding(.vertical, 20)
     }
     var sidebar: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("LIBRARY").font(.system(size: 10, weight: .semibold)).tracking(1.6).foregroundStyle(muted).padding(.bottom, 8)
+        ScrollView(.vertical) {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("BROWSE").font(.system(size: 10, weight: .semibold)).tracking(1.5).foregroundStyle(muted).padding(.bottom, 2)
             filterRow("All devices", icon: "square.grid.2x2", count: model.devices.count)
             filterRow("Mice", icon: "computermouse", count: model.devices.values.filter { $0.category == "Mouse" }.count)
             filterRow("Keyboards", icon: "keyboard", count: model.devices.values.filter { $0.category == "Keyboard" }.count)
             filterRow("Audio", icon: "airpodspro", count: model.devices.values.filter { $0.category == "Audio" }.count)
             filterRow("Saved", icon: "bookmark", count: model.savedDevices.count)
             filterRow("Connectable", icon: "link", count: model.devices.values.filter { $0.connectable }.count)
+            Divider().overlay(Color.white.opacity(0.08)).padding(.vertical, 3)
+            Text("POINTER").font(.system(size: 10, weight: .semibold)).tracking(1.5).foregroundStyle(muted)
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Text("MOUSE SPEED").font(.system(size: 9, weight: .semibold)).tracking(1.1).foregroundStyle(muted)
@@ -534,7 +628,6 @@ struct AppView: View {
                     Text("Fast").foregroundStyle(muted)
                 }.font(.system(size: 9))
             }.padding(11).background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-            Spacer()
             if !model.pointerAllowed {
                 Button {
                     _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
@@ -550,7 +643,8 @@ struct AppView: View {
                     Button("Release adapter") { model.stop() }.buttonStyle(.plain).foregroundStyle(accent).disabled(model.stopping).accessibilityLabel("Release adapter")
                 }
             }.font(.system(size: 11)).padding(13).background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        }.padding(17).background(Color.black.opacity(0.1))
+        }.padding(15)
+        }.scrollIndicators(.visible).background(Color.black.opacity(0.1))
     }
     func filterRow(_ title: String, icon: String, count: Int) -> some View {
         Button { model.filter = title } label: {
@@ -567,7 +661,7 @@ struct AppView: View {
     var deviceList: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Nearby devices").font(.system(size: 16, weight: .semibold))
+                Text("Devices").font(.system(size: 16, weight: .semibold))
                 Spacer()
                 if model.scanning { ProgressView().controlSize(.small).scaleEffect(0.7) }
             }
@@ -579,8 +673,8 @@ struct AppView: View {
                 Spacer()
                 VStack(spacing: 13) {
                     Image(systemName: model.scanning ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right").font(.system(size: 36, weight: .ultraLight)).foregroundStyle(accent.opacity(0.65))
-                    Text(model.scanning ? "Listening for devices" : model.devices.isEmpty ? "Find your next connection" : "No matching devices").font(.system(size: 14, weight: .medium))
-                    Text(model.scanning ? "Put your mouse in pairing mode\nand keep it nearby." : "Start a scan to see nearby\nBluetooth Low Energy devices.").font(.system(size: 12)).foregroundStyle(muted).multilineTextAlignment(.center)
+                    Text(!model.query.isEmpty || model.filter != "All devices" ? "No matching devices" : model.scanning ? "Listening for devices" : model.devices.isEmpty ? "Find your next connection" : "No matching devices").font(.system(size: 14, weight: .medium))
+                    Text(!model.query.isEmpty || model.filter != "All devices" ? "Try another search or choose a different filter." : model.scanning ? "Put your device in pairing mode\nand keep it nearby." : "Start a scan to see nearby\nBLE and Bluetooth Classic devices.").font(.system(size: 12)).foregroundStyle(muted).multilineTextAlignment(.center)
                 }.frame(maxWidth: .infinity)
                 Spacer()
             } else {
@@ -590,7 +684,7 @@ struct AppView: View {
                     }
                 }
             }
-            Text("\(model.visibleDevices.count) devices · BLE + Bluetooth Classic").font(.system(size: 10)).foregroundStyle(muted)
+            Text("\(model.visibleDevices.count) device\(model.visibleDevices.count == 1 ? "" : "s") · BLE + Bluetooth Classic").font(.system(size: 10)).foregroundStyle(muted)
         }.padding(22)
     }
     func deviceRow(_ device: NearbyDevice) -> some View {
@@ -600,12 +694,15 @@ struct AppView: View {
                     .frame(width: 43, height: 45).background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 5) {
                     Text(device.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                    Text(model.connectedAddresses.contains(device.address) ? "Connected" : device.lastSeen.timeIntervalSince1970 == 0 ? "Saved · waiting to wake" : device.name.isEmpty ? device.address : device.category).font(.system(size: 10)).foregroundStyle(model.connectedAddresses.contains(device.address) ? accent : muted)
+                    Text((model.connectedAddresses.contains(device.address) || model.audioAddresses.contains(device.address)) ? "Connected" : device.lastSeen.timeIntervalSince1970 == 0 ? "Saved · waiting to wake" : device.name.isEmpty ? device.address : device.category).font(.system(size: 10)).foregroundStyle((model.connectedAddresses.contains(device.address) || model.audioAddresses.contains(device.address)) ? accent : muted)
                 }
                 Spacer(minLength: 4)
                 VStack(alignment: .trailing, spacing: 5) {
                     Image(systemName: "wifi").font(.system(size: 11)).foregroundStyle(device.rssi > -65 ? accent : muted)
                     Text(device.rssi == -127 ? "—" : "\(device.rssi) dBm").font(.system(size: 9, design: .monospaced)).foregroundStyle(muted)
+                    if !model.connectedAddresses.contains(device.address) && !model.audioAddresses.contains(device.address) {
+                        Text(model.pendingAddress == device.address || model.audioPendingAddress == device.address ? "Connecting…" : "View details").font(.system(size: 9)).foregroundStyle(accent)
+                    }
                 }
             }.padding(11).background(model.selection == device.address ? accent.opacity(0.075) : Color.white.opacity(0.018), in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(model.selection == device.address ? accent.opacity(0.5) : Color.white.opacity(0.035), lineWidth: 1))
@@ -625,7 +722,7 @@ struct AppView: View {
                 VStack(spacing: 15) {
                     info("Address", value: device.address)
                     info("Signal", value: device.rssi == -127 ? "Waiting for device" : "\(device.rssi) dBm · \(device.rssi > -65 ? "Strong" : device.rssi > -80 ? "Fair" : "Weak")")
-                    info("Connection", value: device.connectable ? "Available" : "Broadcast only")
+                    info("Connection", value: model.connectedAddresses.contains(device.address) || model.audioAddresses.contains(device.address) ? "Connected" : (device.category == "Audio" ? device.classicAvailable : device.connectable) ? "Available" : "Unavailable")
                 }.padding(17).background(panel, in: RoundedRectangle(cornerRadius: 12))
                 if let enabled = model.savedDevices[device.address] {
                     VStack(alignment: .leading, spacing: 7) {
@@ -649,8 +746,8 @@ struct AppView: View {
                     HStack(spacing: 9) {
                         Image(systemName: "waveform").foregroundStyle(accent)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("A2DP audio is playing").font(.system(size: 12, weight: .semibold))
-                            Text("Standalone Bluetooth playback · SBC").font(.system(size: 10)).foregroundStyle(muted)
+                            Text("System audio is routed").font(.system(size: 12, weight: .semibold))
+                            Text("Mac output → Bluetooth · SBC").font(.system(size: 10)).foregroundStyle(muted)
                         }
                     }
                     Button { model.disconnectAudio() } label: { Text("Disconnect audio").frame(maxWidth: .infinity).padding(12) }
@@ -669,16 +766,16 @@ struct AppView: View {
                         TextField("Click here to test typing", text: $keyboardTest).textFieldStyle(.roundedBorder).accessibilityLabel("Keyboard test")
                     }
                 } else {
-                    Text(device.category == "Audio" && !device.classicAvailable ? "Waiting for a Classic Bluetooth inquiry result. Put AirPods in pairing mode and scan again." : !device.connectable ? "This device broadcasts information but is not accepting connections." : device.category == "Keyboard" ? "If a pairing code appears, type it on this keyboard and press Enter. Your mouse can stay connected." : device.category == "Audio" ? "Standalone A2DP playback is available for SBC audio devices. The test tone checks the direct Bluetooth audio path." : "Mouse and keyboard input are supported.")
+                    Text(device.category == "Audio" && !device.classicAvailable ? "Run a Bluetooth Classic inquiry to confirm this device supports A2DP audio. Put AirPods in pairing mode if they are not found." : !device.connectable ? "This device broadcasts information but is not accepting connections." : device.category == "Keyboard" ? "If a pairing code appears, type it on this keyboard and press Enter. Your mouse can stay connected." : device.category == "Audio" ? "Route Mac system audio to this A2DP/SBC device. macOS will ask for system-audio recording permission." : "Mouse and keyboard input are supported.")
                         .font(.system(size: 11)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
                     Button { device.category == "Audio" ? model.connectAudio() : model.connect() } label: {
                         HStack {
-                            if model.busy { ProgressView().controlSize(.small) }
-                            Text(device.category == "Audio" ? (model.audioPendingAddress == device.address ? "Connecting…" : "Connect & play test tone") : model.busy ? "Connecting…" : device.category == "Keyboard" ? "Connect keyboard" : "Connect mouse").fontWeight(.semibold)
+                            if model.pendingAddress == device.address || model.audioPendingAddress == device.address { ProgressView().controlSize(.small) }
+                            Text(device.category == "Audio" ? (model.audioPendingAddress == device.address ? "Connecting…" : !model.active ? "Start adapter" : !device.classicAvailable ? "Find audio device" : "Route system audio") : model.pendingAddress == device.address ? "Connecting…" : device.category == "Keyboard" ? "Connect keyboard" : "Connect mouse").fontWeight(.semibold)
                         }.frame(maxWidth: .infinity).padding(12)
                     }.buttonStyle(.plain).foregroundStyle(ink).background(accent, in: RoundedRectangle(cornerRadius: 9))
-                        .accessibilityLabel(model.busy ? "Connecting" : device.category == "Keyboard" ? "Connect keyboard" : "Connect mouse")
-                        .disabled((device.category == "Audio" ? !device.classicAvailable || model.audioPendingAddress != nil : !device.connectable || model.busy) || !model.active || model.stopping)
+                        .accessibilityLabel(model.pendingAddress == device.address || model.audioPendingAddress == device.address ? "Connecting" : device.category == "Audio" ? "Route system audio" : device.category == "Keyboard" ? "Connect keyboard" : "Connect mouse")
+                        .disabled((device.category == "Audio" ? model.audioPendingAddress != nil : !device.connectable || model.busy) || model.stopping)
                 }
                 Spacer(minLength: 0)
             } else {
@@ -772,7 +869,7 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(8)
             }
-        }.padding(24).frame(width: 520).preferredColorScheme(.dark)
+        }.padding(24).frame(width: 520).background(ink).tint(accent).preferredColorScheme(.dark)
             .onAppear { model.refreshLoginStatus() }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshLoginStatus() }
     }
@@ -815,8 +912,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "Quit Raw Bluetooth", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = statusMenu
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
         window.title = "Raw Bluetooth"
-        window.titlebarAppearsTransparent = true
+        window.titlebarAppearsTransparent = false
         window.backgroundColor = NSColor(red: 0.07, green: 0.09, blue: 0.13, alpha: 1)
         window.contentView = NSHostingView(rootView: AppView(model: model))
         window.center()
@@ -842,6 +941,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func openWindow() {
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+    @objc func systemDidWake(_ notification: Notification) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.model.recoverAfterWake() }
     }
     @objc func openSettings() {
         if settingsWindow == nil {
@@ -894,6 +996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 @main
 struct RawBluetoothApplication {
     static func main() {
+        signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         let delegate = AppDelegate()

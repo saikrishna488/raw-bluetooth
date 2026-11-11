@@ -81,3 +81,22 @@ The signing certificate is pinned in the app's designated requirement so the ide
 Installed builds select `Contents/Helpers/backend.app` rather than a source checkout. The GUI creates `~/Library/Application Support/Raw Bluetooth` as the logged-in user and passes it explicitly to the authorized worker. Identity, bonds, report maps and saved-device data are kept there. Source builds retain their checkout-local state. The installer contains neither private runtime state nor the local development signing identity.
 
 The DMG uses ad-hoc signatures and is not notarized. Release verification mounts it read-only, checks signatures and package contents, and exercises backend imports, the bundled USB library and FFmpeg without a checkout or Python on PATH. Hardware pairing and permission prompts still require manual testing on a separate Mac.
+
+## Native HID implementation
+
+`native/hid.cpp` implements descriptor parsing and mouse/keyboard report decoding
+in C++17, exposed through the CPython API. A capsule owns each parsed descriptor;
+report decoding reads at most five bytes per field, including unaligned 32-bit
+values, rather than converting the entire report into an arbitrary-precision
+integer. Descriptor dimensions, total report bits and field counts are bounded.
+`native_hid.py` preserves field metadata and keyboard state across report IDs.
+`hid_backend.py` selects the extension, or the Python reference implementation
+when it is absent or explicitly disabled. A present but broken native extension
+fails visibly rather than silently switching implementations.
+
+`native/build.py` compiles for the running Python interpreter. There are no
+additional runtime libraries beyond the C++ standard library and Python.
+`test_native_hid.py` reuses the existing HID contract tests and compares all field
+widths and alignments against Python; `native/benchmark.py` compares decode
+throughput. The Bluetooth protocol stack remains Bumble, so the worker continues
+to require its Python runtime and dependencies.

@@ -23,7 +23,7 @@ from saved_devices import SavedDevices
 from runtime_paths import data_directory
 from adapters import select_transport, migrate_bonds, forget_bond
 from bumble.keys import JsonKeyStore
-from audio_stream import A2DPTestTone
+from audio_stream import A2DPTestTone, validate_audio_file
 
 
 def advertisement_info(adv, previous=None):
@@ -50,7 +50,10 @@ def advertisement_info(adv, previous=None):
                 else 'Audio' if audio_name or previous.get('category') == 'Audio'
                 else 'BLE device')
     return dict(address=str(adv.address), name=name, rssi=adv.rssi,
-                connectable=bool(adv.is_connectable or previous.get('connectable', False) or classic_available),
+                # Scan responses supplement the preceding advertisement.
+                connectable=bool(adv.is_connectable or classic_available or
+                                 (getattr(adv, "is_scan_response", False) and
+                                  previous.get("connectable", False))),
                 classic_available=classic_available,
                 appearance=appearance, category=category, last_seen=time.time())
 
@@ -64,7 +67,7 @@ def read_command(path, last_id):
         return None
     if not isinstance(command, dict) or not isinstance(command.get('id'), str) or command['id'] == last_id:
         return None
-    if command.get('action') not in ('scan', 'pause', 'connect', 'disconnect', 'stop', 'remember', 'forget', 'audio_test', 'audio_disconnect'):
+    if command.get('action') not in ('scan', 'pause', 'connect', 'disconnect', 'stop', 'remember', 'forget', 'audio_test', 'audio_play', 'audio_system', 'audio_disconnect'):
         return None
     return command
 
@@ -140,6 +143,12 @@ class Backend:
         key = str(adv.address)
         previous = self.devices.get(key) or self.saved.devices.get(key)
         info = advertisement_info(adv, previous)
+        # Discard anonymous broadcast-only beacons. Keep known devices and
+        # audio candidates so a Classic inquiry can identify them separately.
+        if not info['name'] and key not in self.saved.devices:
+            self.devices.pop(key, None)
+            self.addresses.pop(key, None)
+            return
         self.devices[key] = info
         # Keep the Classic inquiry address object for A2DP when the same AirPods
         # also send BLE advertisements.
@@ -157,6 +166,7 @@ class Backend:
             name = name.decode('utf-8', 'replace')
         major_class = (class_of_device >> 8) & 0x1F
         audio_name = any(word in name.lower() for word in ('airpod', 'headphone', 'headset', 'earbud', 'speaker', 'buds'))
+        # Avoid listing arbitrary nearby computers/phones as audio sinks.
         if major_class != 4 and not audio_name:
             return
         key = str(address)
@@ -165,38 +175,57 @@ class Backend:
         self.devices[key], self.addresses[key] = info, address
         self.emit('device', **info)
 
-    async def audio_test(self, key):
+    async def audio_test(self, key, audio_file=None, system_fifo=None):
         if key not in self.addresses or self.devices.get(key, {}).get('category') != 'Audio':
             raise ValueError('Select a discovered Bluetooth audio device first.')
         if key in self.audio_tasks and not self.audio_tasks[key].done():
             return
-        await self.stop_classic_inquiry()
+        if audio_file is not None:
+            audio_file = validate_audio_file(audio_file)
+        # The USB controller cannot reliably maintain BLE discovery while
+        # opening a BR/EDR A2DP ACL. Stop both scan modes before connecting.
+        await self.pause()
         # LE reports may represent a public identity address with type 0x02.
         # BR/EDR connection commands require the same six bytes as a public
         # device address (type 0x00).
         classic_address = hci.Address(key.split('/')[0], hci.Address.PUBLIC_DEVICE_ADDRESS)
-        task = asyncio.create_task(self.play_audio_test(key, classic_address))
+        task = asyncio.create_task(self.play_audio_test(key, classic_address, audio_file, system_fifo))
         self.audio_tasks[key] = task
 
-    async def play_audio_test(self, key, address):
-        session = A2DPTestTone(self.device, address)
+    async def play_audio_test(self, key, address, audio_file=None, system_fifo=None):
+        session = A2DPTestTone(self.device, address, audio_file, system_fifo)
         self.emit('audio_connecting', address=key)
         try:
             await session.start()
-            self.emit('audio_connected', address=key, message='A2DP connected · playing test tone')
+            self.emit('audio_connected', address=key, message='System audio routed over A2DP' if system_fifo else 'A2DP connected · playing audio' if audio_file else 'A2DP connected · playing test tone')
             await session.pump.pump_task
-            if not asyncio.current_task().cancelling():
+            pump_exc = session.pump.pump_task.exception() if session.pump.pump_task.done() and not session.pump.pump_task.cancelled() else None
+            logging.info('A2DP pump finished: exc=%s, ffmpeg returncode=%s', pump_exc, session.process.returncode if session.process else None)
+            if system_fifo:
+                # System-audio FIFO: the pump ends when the capture stops or the
+                # user disconnects — not an error.
+                self.emit('audio_finished', address=key)
+            elif audio_file and await asyncio.wait_for(session.process.wait(), 3) == 0:
+                self.emit('audio_finished', address=key)
+            else:
                 encoder_status = session.process.returncode if session.process else 'unknown'
-                raise RuntimeError(f'A2DP media sender stopped unexpectedly (encoder status {encoder_status}).')
+                stream_state = getattr(session.stream, 'state', 'unknown')
+                if encoder_status is None:
+                    raise RuntimeError(f'The AirPods stopped the A2DP stream (stream state {stream_state}). Check that system-audio recording is allowed and try again.')
+                raise RuntimeError(f'A2DP media sender stopped unexpectedly (encoder status {encoder_status}, stream state {stream_state}).')
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logging.exception('A2DP connection failed')
             self.emit('audio_error', address=key, message=f'Could not start Bluetooth audio: {exc}')
         finally:
-            await session.close()
-            self.audio_tasks.pop(key, None)
-            self.emit('audio_disconnected', address=key)
+            try:
+                await session.close()
+            finally:
+                self.audio_tasks.pop(key, None)
+                self.emit('audio_disconnected', address=key)
+                if not self.stopping:
+                    await self.resume_scan()
 
     async def disconnect_audio(self, key=None):
         keys = [key] if key else list(self.audio_tasks)
@@ -229,6 +258,15 @@ class Backend:
                 # A continuous BR/EDR inquiry loop conflicts with this adapter's
                 # audio ACL sessions. Run one inquiry per explicit Scan action.
                 await self.device.start_discovery(auto_restart=False)
+
+    def expire_devices(self):
+        # Saved devices stay visible as offline rows for reconnection.
+        now = time.time()
+        for key, info in list(self.devices.items()):
+            if key not in self.saved.devices and now - info.get('last_seen', 0) > 30:
+                self.devices.pop(key, None)
+                self.addresses.pop(key, None)
+                self.emit('device_removed', address=key)
 
     async def stop_classic_inquiry(self):
         if self.device and self.device.discovering:
@@ -432,6 +470,13 @@ class Backend:
                                 self.remember(command.get('address'), command['enabled'])
                             elif action == 'audio_test':
                                 await self.audio_test(command.get('address'))
+                            elif action == 'audio_play':
+                                await self.audio_test(command.get('address'), validate_audio_file(command.get('path')))
+                            elif action == 'audio_system':
+                                fifo = Path(command.get('path', ''))
+                                if self.folder not in fifo.parents:
+                                    raise ValueError('Invalid system-audio stream path')
+                                await self.audio_test(command.get('address'), system_fifo=fifo)
                             elif action == 'audio_disconnect':
                                 await self.disconnect_audio(command.get('address'))
                             elif action == 'forget':
@@ -439,6 +484,7 @@ class Backend:
                         except Exception as exc:
                             self.emit('error', message=str(exc))
                     await self.auto_reconnect()
+                    self.expire_devices()
                     await asyncio.sleep(0.2)
             finally:
                 self.stopping = True

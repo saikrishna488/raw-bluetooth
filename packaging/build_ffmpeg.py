@@ -10,9 +10,11 @@ VERSION = '7.1.1'
 SHA256 = '733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1'
 FLAGS = ['--extra-cflags=-mmacosx-version-min=13.0', '--extra-ldflags=-mmacosx-version-min=13.0', '--disable-everything', '--disable-autodetect', '--disable-network',
          '--disable-x86asm', '--disable-debug', '--disable-doc', '--enable-ffmpeg',
-         '--disable-ffplay', '--disable-ffprobe', '--enable-protocol=pipe',
+         '--disable-ffplay', '--disable-ffprobe', '--enable-protocol=pipe,file',
          '--enable-indev=lavfi', '--enable-filter=sine,aformat,aresample,anull',
-         '--enable-decoder=pcm_s16le', '--enable-encoder=sbc', '--enable-muxer=sbc', '--enable-swresample', '--enable-avfilter']
+         '--enable-demuxer=wav,mp3,flac,mov',
+         '--enable-parser=mpegaudio,flac,aac',
+         '--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3float,flac,aac,alac', '--enable-encoder=sbc', '--enable-muxer=sbc', '--enable-swresample', '--enable-avfilter']
 
 
 def build(folder):

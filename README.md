@@ -1,12 +1,12 @@
 # Raw Bluetooth for macOS
 
-Current version: **0.4.0** (build 7).
+Current version: **0.5.0** (build 8).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
 Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and translates HID reports into native macOS input events. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
 
-**Mouse and keyboard support is working on the development setup. Audio is still in progress.** A2DP/SBC test-tone playback is implemented, but the app does not provide a macOS system audio output or microphone input.
+**Mouse and keyboard support is working on the development setup. System audio routing to Bluetooth A2DP/SBC devices is experimental.** The app captures macOS system audio and streams it to a discovered Bluetooth audio sink. Microphone input is not implemented.
 
 ## Install the compiled app
 
@@ -46,8 +46,8 @@ The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace y
 | Saved devices and automatic reconnection | Implemented; requires an active app session and device advertising |
 | Mouse and scroll speed controls | Implemented |
 | Bluetooth Classic audio discovery | Implemented |
-| A2DP/SBC built-in test tone | Experimental; device compatibility is not established broadly |
-| System-wide audio routing, microphone, HFP/SCO | Not implemented |
+| System audio routed to a Bluetooth A2DP/SBC sink | Experimental; requires macOS system-audio recording permission and compatible audio hardware |
+| Microphone input, HFP/SCO | Not implemented |
 | Keyboard LED synchronization and vendor-specific Fn functions | Not implemented |
 | Boot/login-screen input and guaranteed recovery after sleep | Not supported |
 
@@ -129,3 +129,28 @@ Host identity, Bluetooth bonding keys, saved device preferences, logs, and signi
 Bluetooth functionality uses [Google Bumble](https://github.com/google/bumble), pinned to `0.0.219`; the full Python environment is in [requirements-lock.txt](requirements-lock.txt). Experimental audio encoding uses FFmpeg through `imageio-ffmpeg`.
 
 Bundled Atheros firmware retains its [vendor license](firmware/LICENCE.atheros_firmware), with origin URLs and SHA-256 hashes in [firmware/manifest.json](firmware/manifest.json). Those terms apply to the firmware. This repository does not currently declare a license for its original source code.
+
+### C++ HID decoder
+
+Build the native parser and decoder using the same Python interpreter that runs
+Raw Bluetooth (requires Xcode Command Line Tools on macOS):
+
+```sh
+.venv/bin/python native/build.py
+.venv/bin/python -m unittest discover -v
+.venv/bin/python native/benchmark.py
+```
+
+The backend automatically uses the compiled C++17 extension when present. Rebuild
+it after changing Python versions or CPU architecture. Set
+`RAW_BLUETOOTH_PYTHON_HID=1` to select the Python reference implementation.
+Without the extension, source checkouts continue using Python. Release builds
+compile and bundle the native decoder and verify its selection during self-test.
+
+This is a partial native migration: HID descriptor parsing and per-report field
+extraction/decoding run in C++; keyboard state aggregation and Bluetooth session
+management still use Python/Bumble. The desktop UI and input output use Swift.
+The benchmark measures decoding only, not end-to-end input latency. USB pairing,
+A2DP, and packaged app installation still require hardware testing.
+
+For experimental system audio routing, select a Classic audio device and choose **Route system audio**. macOS may ask for Screen & System Audio Recording permission. **Disconnect audio** stops the route. Audio output quality and latency depend on the adapter and A2DP sink; microphone input is not provided.

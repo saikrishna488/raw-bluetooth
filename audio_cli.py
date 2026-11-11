@@ -89,12 +89,15 @@ async def run(args):
             return
         name, address = found.result()
         print(f'Connecting using BR/EDR PUBLIC address {address}', flush=True)
-        session = A2DPTestTone(device, address)
+        session = A2DPTestTone(device, address, args.file)
         try:
             await session.start()
-            print('A2DP/SBC stream started. The 440 Hz test tone should be audible.', flush=True)
+            print('A2DP/SBC stream started.' + (' Playing audio file.' if args.file else ' Playing 440 Hz test tone.'), flush=True)
             await session.pump.pump_task
-            print('A2DP packet sender ended unexpectedly.', flush=True)
+            if args.file and await asyncio.wait_for(session.process.wait(), 3) == 0:
+                print('Playback finished.', flush=True)
+            else:
+                raise RuntimeError('A2DP packet sender ended unexpectedly.')
         finally:
             await session.close()
 
@@ -102,6 +105,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--transport', default='usb:0a12:0001')
+    parser.add_argument('--file', type=Path, help='Play a local WAV, MP3, FLAC, or M4A file')
     parser.add_argument('--timeout', type=int, default=45)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')

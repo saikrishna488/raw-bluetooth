@@ -19,3 +19,7 @@ pointer.ready
 build/
 dist/
 *.spec
+
+# Compiled HID extension
+_hid_native*.so
+_hid_native*.pyd

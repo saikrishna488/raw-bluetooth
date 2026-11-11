@@ -19,6 +19,10 @@ def main():
         parser.error('--data-dir is required for the packaged worker')
     if args.self_test:
         import ctypes
+        import _hid_native
+        from hid_backend import MouseReports
+        assert MouseReports.__module__ == "native_hid"
+        assert MouseReports(bytes.fromhex("050109301581750895018106")).decode(0, b"\xff") == {"x": -1}
         import gui_backend
         import bumble.transport.usb
         import libusb_package
