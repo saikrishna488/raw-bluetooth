@@ -15,6 +15,7 @@ from bumble.core import AdvertisingData, UUID
 from bumble.device import Device, DeviceConfiguration, Peer
 from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.transport import open_transport
+from adapters import select_transport
 from hid_backend import MouseReports, KeyboardReports
 from pointer import Pointer, request_accessibility
 
@@ -216,7 +217,8 @@ async def use_mouse(device, address, args, pointer, observer=None):
 async def run(args):
     os.umask(0o077)
     pointer = None if args.dry_run else SocketPointer(args.event_socket) if args.event_socket else Pointer()
-    async with await open_transport(args.transport) as transport:
+    transport_name, _ = await asyncio.to_thread(select_transport, args.transport)
+    async with await open_transport(transport_name) as transport:
         device = Device.from_config_with_hci(configuration(), transport.source, transport.sink)
         device.pairing_config_factory = lambda _: PairingConfig(
             sc=True, mitm=False, bonding=True,
@@ -271,7 +273,7 @@ async def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--transport', default='usb:0a12:0001')
+    parser.add_argument('--transport', default='auto')
     parser.add_argument('--address', help='Only connect to this mouse address')
     parser.add_argument('--dry-run', action='store_true', help='Log reports without posting pointer events')
     parser.add_argument('--scan-timeout', type=int, default=60)

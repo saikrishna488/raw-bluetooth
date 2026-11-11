@@ -32,6 +32,10 @@ final class BluetoothModel: ObservableObject {
     @Published var phase = "idle"
     @Published var active = false
     @Published var scanning = false
+    @Published var adapterTransport = ""
+    @Published var adapterID = UserDefaults.standard.string(forKey: "adapterID") ?? "" {
+        didSet { UserDefaults.standard.set(adapterID, forKey: "adapterID") }
+    }
     @Published var connectedAddresses = Set<String>()
     @Published var audioAddresses = Set<String>()
     @Published var audioPendingAddress: String?
@@ -221,7 +225,10 @@ final class BluetoothModel: ObservableObject {
             let python = source.appendingPathComponent(".venv/bin/python").path
             let script = source.appendingPathComponent("gui_backend.py").path
             let command = packagedWorker.map { "\(shellQuote($0.path)) --data-dir \(shellQuote(dataDirectory.path))" } ?? "\(shellQuote(python)) -u \(shellQuote(script))"
-            let shell = "\(command) --session \(shellQuote(folder.path)) > \(shellQuote(folder.appendingPathComponent("backend.log").path)) 2>&1"
+            let adapter = adapterID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let transport = adapter.isEmpty ? "auto" : "usb:" + adapter
+            adapterTransport = ""
+            let shell = "\(command) --transport \(shellQuote(transport)) --session \(shellQuote(folder.path)) > \(shellQuote(folder.appendingPathComponent("backend.log").path)) 2>&1"
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             process.arguments = ["-e", "do shell script \(appleQuote(shell)) with administrator privileges"]
@@ -491,6 +498,11 @@ final class BluetoothModel: ObservableObject {
             log("Keyboard pairing code displayed")
             return
         }
+        if state == "adapter" {
+            adapterTransport = event["transport"] as? String ?? ""
+            log("Using USB adapter \(adapterTransport)")
+            return
+        }
         if state == "error" { fail(event["message"] as? String ?? "Connection failed"); return }
         if state == "reconnect_wait" {
             if pendingAddress == event["address"] as? String { pendingAddress = nil; pairingCode = nil }
@@ -637,7 +649,7 @@ struct AppView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack { Image(systemName: "usb.connector").foregroundStyle(accent); Text("USB adapter").fontWeight(.medium) }
-                Text(model.active ? "In use by Raw Bluetooth" : "CSR · 0a12:0001").foregroundStyle(muted)
+                Text(model.active && !model.adapterTransport.isEmpty ? model.adapterTransport : (model.adapterID.isEmpty ? "External USB Bluetooth · auto detect" : "USB · " + model.adapterID)).foregroundStyle(muted)
                 Text("Other Bluetooth connections on this adapter pause while it’s in use.").foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
                 if model.active {
                     Button("Release adapter") { model.stop() }.buttonStyle(.plain).foregroundStyle(accent).disabled(model.stopping).accessibilityLabel("Release adapter")
@@ -820,6 +832,7 @@ struct SettingsView: View {
     var onDone: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
                 Text("Settings").font(.title2.bold())
@@ -838,6 +851,14 @@ struct SettingsView: View {
                     Toggle("Start with the window hidden", isOn: $model.startHidden)
                     Toggle("Connect saved devices on launch", isOn: $model.connectOnLaunch)
                     Text("Adapter access may ask for an administrator password when a new session starts.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(8)
+            }
+            GroupBox("USB adapter") {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Automatic (or USB ID, e.g. 0a12:0001)", text: $model.adapterID)
+                        .disabled(model.active)
+                    Text("Leave blank to detect one external Bluetooth adapter automatically. With several dongles, enter the chosen adapter’s USB ID. Release the adapter before changing this setting. Controllers needing vendor firmware are not supported.")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(8)
             }
@@ -869,7 +890,8 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(8)
             }
-        }.padding(24).frame(width: 520).background(ink).tint(accent).preferredColorScheme(.dark)
+        }.padding(24)
+        }.frame(width: 520, height: 620).background(ink).tint(accent).preferredColorScheme(.dark)
             .onAppear { model.refreshLoginStatus() }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshLoginStatus() }
     }

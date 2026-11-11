@@ -76,7 +76,7 @@ Request the CLI Accessibility prompt with:
 
 | Option | Default / behavior |
 | --- | --- |
-| `--transport` | `usb:0a12:0001`; explicit Bumble transport |
+| `--transport` | `auto`; detect one external standard USB HCI controller, or select `usb:VID:PID` |
 | `--address` | Restrict the mouse address; otherwise match its advertised name |
 | `--dry-run` | Print reports without posting pointer events |
 | `--scan-timeout` | 60 seconds |
@@ -104,4 +104,16 @@ Experimental Classic audio discovery and test-tone session:
 sudo .venv/bin/python -u audio_cli.py --timeout 45
 ```
 
-This CLI currently targets AirPods discovery and accepts `--transport` (default `usb:0a12:0001`). The timeout bounds discovery; use Ctrl-C to stop playback. It is a diagnostic tool, not a general audio player.
+This CLI currently targets AirPods discovery and accepts `--transport` (default `auto`). The timeout bounds discovery; use Ctrl-C to stop playback. It is a diagnostic tool, not a general audio player.
+
+## Selecting another USB Bluetooth adapter
+
+The desktop app and mouse/audio CLIs detect one external standard USB HCI adapter automatically. In **Settings → USB adapter**, leave the field blank for automatic selection or enter a USB ID such as `0bda:8771` to choose a detected controller. Release an active session before changing the selection. With multiple adapters, choose one explicitly; identical VID/PID duplicates must be unplugged until only one remains.
+
+For a source checkout, pass the chosen ID to the backend or either CLI:
+
+```sh
+sudo .venv/bin/python -u m196_driver.py --transport usb:VID:PID --dry-run
+```
+
+Replace `VID:PID` with your adapter's four-digit hexadecimal USB vendor and product IDs. Selection verifies the external USB topology and standard HCI event/ACL endpoints. Internal, unavailable, and nonstandard devices are rejected. Vendor firmware loading is not provided; a detected controller can still fail initialization. CSR `0a12:0001` remains the only hardware-verified adapter. Audio additionally requires BR/EDR/A2DP capability; a BLE-only dongle cannot provide it.

@@ -9,6 +9,7 @@ from bumble.core import AdvertisingData
 from bumble.device import Device, PhysicalTransport
 from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.transport import open_transport
+from adapters import select_transport
 from bumble.keys import JsonKeyStore
 
 from audio_stream import A2DPTestTone
@@ -21,7 +22,8 @@ def local_name(data):
 
 
 async def run(args):
-    async with await open_transport(args.transport) as transport:
+    transport_name, _ = await asyncio.to_thread(select_transport, args.transport)
+    async with await open_transport(transport_name) as transport:
         device = Device.from_config_with_hci(
             configuration(classic_enabled=True), transport.source, transport.sink
         )
@@ -104,7 +106,7 @@ async def run(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--transport', default='usb:0a12:0001')
+    parser.add_argument('--transport', default='auto')
     parser.add_argument('--file', type=Path, help='Play a local WAV, MP3, FLAC, or M4A file')
     parser.add_argument('--timeout', type=int, default=45)
     args = parser.parse_args()

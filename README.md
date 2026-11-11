@@ -1,6 +1,6 @@
 # Raw Bluetooth for macOS
 
-Current version: **0.5.0** (build 8).
+Current version: **0.6.0** (build 9).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
@@ -60,12 +60,14 @@ Mouse and keyboard reports are decoded from each device's HID descriptor rather 
 - macOS 13 or later, with a logged-in desktop session.
 - Xcode Command Line Tools (`swiftc`, installed with `xcode-select --install`).
 - Python 3.9 or later. The pinned environment was developed with Python 3.9; other versions need validation.
-- An external CSR USB Bluetooth adapter with USB ID **`0a12:0001`** for the default transport.
+- An external USB Bluetooth adapter exposing a standard Bluetooth HCI interface and event/ACL endpoints. CSR **`0a12:0001`** is hardware-tested; other controller models still need validation.
 - Administrator authentication to claim the USB adapter and Accessibility permission for input output.
 
 The build script currently targets **`x86_64-apple-macosx13.0`**. Native Apple Silicon builds are not configured or validated. Sharing a USB ID does not guarantee identical dongle firmware or behavior.
 
-The external adapter is exclusively occupied during a raw session. The default selection deliberately excludes the internal Lite-On `04ca:3018` radio. The Atheros firmware helper in the repository is not used by default adapter selection.
+The external adapter is exclusively occupied during a raw session. Automatic selection now detects external standard USB Bluetooth HCI controllers regardless of vendor. With multiple dongles, enter the desired `VID:PID` in **Settings → USB adapter** before starting a session; leave it blank for automatic selection. The sidebar shows the selected transport.
+
+Internal radios, Apple controllers, and the onboard Lite-On `04ca:3018` are excluded. Detection uses macOS USB topology and validates the HCI interface and interrupt/bulk endpoints. Unknown topology and duplicate dongles with identical USB IDs are excluded from selection. The app does not download vendor firmware or force nonstandard interfaces: Realtek, Broadcom, Intel, and other controllers that require vendor firmware or initialization may not work, even if detected. The Atheros firmware helper is not used automatically. Detection establishes a usable USB interface, not verified pairing, HID, or audio compatibility.
 
 ## Quick start
 
