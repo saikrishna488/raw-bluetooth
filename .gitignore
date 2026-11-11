@@ -23,3 +23,7 @@ dist/
 # Compiled HID extension
 _hid_native*.so
 _hid_native*.pyd
+
+AGENTS.md
+
+agents.md

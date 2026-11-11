@@ -26,7 +26,7 @@ python3 -m venv .venv
 .venv/bin/python packaging/build_release.py
 ```
 
-The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace your installed development app or use its local signing key. GitHub Actions builds and publishes a prerelease when the version or packaging changes on `main`; each published installer requires a new version. Developer ID signing and notarization are not automated in this preview.
+The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace your installed development app or use its local signing key. Build installers locally and upload the DMG and SHA-256 checksum to GitHub Releases manually; each published installer requires a new version. Developer ID signing and notarization are not automated in this preview.
 
 ## GUI preview
 
