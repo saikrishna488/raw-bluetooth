@@ -8,7 +8,7 @@ from bumble import hci
 from bumble.core import AdvertisingData
 from bumble.device import Device, PhysicalTransport
 from bumble.pairing import PairingConfig, PairingDelegate
-from bumble.transport import open_transport
+from usb_service import open_driver_transport as open_transport
 from adapters import select_transport
 from bumble.keys import JsonKeyStore
 

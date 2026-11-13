@@ -23,6 +23,8 @@ dist/
 # Compiled HID extension
 _hid_native*.so
 _hid_native*.pyd
+_driver_native*.so
+_driver_native*.pyd
 
 AGENTS.md
 

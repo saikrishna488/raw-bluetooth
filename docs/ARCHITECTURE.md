@@ -16,11 +16,11 @@ flowchart LR
 
 ## Desktop session
 
-`gui/RawBluetooth.swift` presents discovery, connection state, pairing prompts, saved devices, and speed controls. It launches `gui_backend.py` with administrator authorization for USB access. Commands travel through a session command file; discovery and status events return through JSONL. The native app receives input reports through its pointer server and posts native mouse/keyboard events without running the GUI as root.
+`gui/RawBluetooth.swift` presents discovery, connection state, pairing prompts, saved devices, and speed controls. After one-time USB service installation, it launches `gui_backend.py` as the desktop user. Without the service, it retains per-session administrator authorization. Commands travel through a session command file; discovery and status events return through JSONL. The native app receives input reports through its pointer server and posts native mouse/keyboard events without running the GUI as root.
 
 The backend uses `adapters.select_transport()` to select a single external standard USB HCI adapter or validate an explicit VID/PID. It reads macOS USB topology, excludes internal/unknown controllers and duplicate identities, and checks the HCI interface and event/ACL endpoints without claiming the controller. Vendor firmware loading is not provided. The desktop app stores an optional USB ID selection in UserDefaults. The backend then opens Bumble's HCI transport, and creates a Bluetooth device with the persisted host identity. It handles BLE advertisements, Classic inquiry, pairing, connections, and reconnection scheduling. Input connections discover the HID service, parse its report map, and subscribe to relevant report characteristics.
 
-The GUI provides a menu bar icon and can keep running after its main window closes. This preserves the worker and native input output in the logged-in user session. Startup and background preferences are stored in macOS UserDefaults; launch at login is registered through `SMAppService.mainApp` and remains subject to macOS approval. The app does not install a persistent privileged helper.
+The GUI provides a menu bar icon and can keep running after its main window closes. This preserves the worker and native input output in the logged-in user session. Startup and background preferences are stored in macOS UserDefaults; launch at login is registered through `SMAppService.mainApp` and remains subject to macOS approval. Settings can install a persistent privileged C++ USB broker (`native/usb_service.cpp`) from the packaged app. `usb_service.py` is now only its unprivileged Bumble transport adapter. The installer copies its complete runtime to a root-owned directory under `/Library/PrivilegedHelperTools`, rejects external symlinks, and registers a launchd daemon. An owner-only Unix socket and kernel peer credentials restrict access to the installing account. Requests accept only validated external USB VID/PIDs and HCI packets; no user paths, app commands, pairing files, or input output run in the broker. Only one client can claim USB at a time. Disconnect closes the USB transport. Reinstall after updates; installation and removal require administrator approval.
 
 The GUI renews a heartbeat on a dedicated dispatch queue, independently of UI polling. An activity token prevents App Nap throttling during an adapter session while allowing normal system sleep. The worker stops after a lease expires if the GUI crashes or disappears; normal shutdown disconnects peers, attempts a controller reset, and releases the USB transport. Session events record heartbeat expiry, an explicit Stop command, or a shutdown signal. This cleanup is best effort: USB resets and deep sleep can still require manual recovery.
 
@@ -46,7 +46,7 @@ Input socket delivery retries temporary macOS datagram buffer exhaustion in orde
 | `gui/PointerServer.swift` | Native input report server and mouse output |
 | `gui/KeyboardOutput.swift` | Native keyboard output |
 | `gui/build.command`, `gui/sign_app.py` | Build, install, and locally sign the desktop app |
-| `gui_backend.py` | Privileged Bluetooth worker and session commands |
+| `gui_backend.py` | Unprivileged Bumble protocol bridge and async session commands |
 | `m196_driver.py` | Host configuration, BLE pairing, HID subscriptions, mouse CLI |
 | `hid_mouse.py`, `hid_keyboard.py` | HID decoding |
 | `adapters.py` | Default external adapter selection and bond maintenance |
@@ -70,7 +70,7 @@ Input socket delivery retries temporary macOS datagram buffer exhaustion in orde
 | `.signing/` | Dedicated local signing keychain, certificate, and password |
 | `*.log`, `*.hex`, `*.sock`, `pointer.ready`, `driver.stop` | Runtime diagnostics, reports, IPC, and stop/readiness markers |
 
-Identity, bonds, and preferences are created with owner-only permissions. Some files are owned by root because the USB worker runs with administrator privileges. Bond keys are not included in GUI status events. The CLI scanner and mouse diagnostics can expose addresses and reports, so review logs before attaching them to an issue.
+Identity, bonds, and preferences are created with owner-only permissions. The normal-user worker owns state after USB service installation; legacy per-session administrator mode can leave root-owned files. The installer migrates known state ownership, and diagnostic dumps use nonfatal atomic replacement. Bond keys are not included in GUI status events. The CLI scanner and mouse diagnostics can expose addresses and reports, so review logs before attaching them to an issue.
 
 The signing certificate is pinned in the app's designated requirement so the identity stays stable across builds. Preserve `.signing/` locally to retain that identity and associated Accessibility authorization. A fresh checkout creates its own identity. The build temporarily adds its dedicated keychain to the user search list and restores the previous list afterward.
 
@@ -94,9 +94,13 @@ integer. Descriptor dimensions, total report bits and field counts are bounded.
 when it is absent or explicitly disabled. A present but broken native extension
 fails visibly rather than silently switching implementations.
 
-`native/build.py` compiles for the running Python interpreter. There are no
+`native/build.py` compiles the HID and backend modules for the running Python interpreter, plus the standalone C++ USB broker. There are no
 additional runtime libraries beyond the C++ standard library and Python.
 `test_native_hid.py` reuses the existing HID contract tests and compares all field
 widths and alignments against Python; `native/benchmark.py` compares decode
 throughput. The Bluetooth protocol stack remains Bumble, so the worker continues
 to require its Python runtime and dependencies.
+
+## C++ backend and bridge
+
+See [Native backend and Bumble bridge](NATIVE_BRIDGE.md) for the migrated components, privilege boundary, compatibility, and build instructions. The privileged broker runs without Python; Bumble protocol orchestration remains in an unprivileged bundled Python worker.

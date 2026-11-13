@@ -8,13 +8,13 @@ Start with the [installation instructions](../README.md#quick-start). Run comman
 
 *Earlier UI preview: newer keyboard, saved-device, speed, and audio controls are not shown in this capture.*
 
-**Scan devices** starts discovery and requests administrator authentication for USB access. Search by name/address, or use the Mice, Keyboards, Connectable, Audio, and Saved filters. Select an entry to inspect its address, signal, type, and connection availability. A discovery entry alone does not establish that its protocol is supported.
+**Scan devices** starts discovery. Install USB access once in Settings → Authorization to avoid repeated administrator prompts; otherwise Scan requests administrator authentication. Search by name/address, or use the Mice, Keyboards, Connectable, Audio, and Saved filters. Select an entry to inspect its address, signal, type, and connection availability. A discovery entry alone does not establish that its protocol is supported.
 
 Connect a BLE mouse or keyboard using the corresponding action. A mouse and keyboard can remain connected together. For keyboard pairing, enter the displayed passkey on the keyboard being paired, preserving leading zeroes, then press Enter. The connected keyboard has a local test field. Adjust **Mouse speed** and **Scroll speed** independently; their settings persist across launches.
 
 ### Reconnection and forgetting devices
 
-Successful input connections are saved with automatic reconnection enabled by default. The Saved filter and **Reconnect automatically** switch control this preference. On a later launch, saved devices start an adapter session automatically; USB access may still require administrator authentication.
+Successful input connections are saved with automatic reconnection enabled by default. The Saved filter and **Reconnect automatically** switch control this preference. On a later launch, saved devices start an adapter session automatically; USB access needs no administrator prompt after the one-time service installation.
 
 Wake a paired device with normal movement, clicks, or keypresses. It must advertise before reconnection can occur. Avoid holding its pairing button unless re-pairing is intended. An intentional **Disconnect** pauses retries for that device for the session until explicitly reconnected or automatic reconnection is re-enabled. If the device clears its bond or changes identity, pair it manually again. The forget action removes its saved preference and stored bond for that peer.
 
@@ -34,7 +34,7 @@ The separate launcher is for the M196 mouse workflow:
 ./'Start M196 Driver.command'
 ```
 
-It starts an unprivileged pointer helper, requests administrator authentication for the Bluetooth process, and runs for up to 24 hours. Ctrl-C requests cleanup. In another Terminal, or by double-clicking the file, stop with:
+It starts an unprivileged pointer helper and runs for up to 24 hours. With USB access installed, the Bluetooth process also runs as your normal user. Otherwise it requests administrator authentication. Ctrl-C requests cleanup. In another Terminal, or by double-clicking the file, stop with:
 
 ```sh
 ./'Stop M196 Driver.command'

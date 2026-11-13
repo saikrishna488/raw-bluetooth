@@ -1,84 +1,29 @@
 """Experimental Logitech M196 USB-HCI -> BLE HID -> macOS pointer driver."""
 import argparse
 import asyncio
-import errno
 import json
 import logging
 import os
 from pathlib import Path
-import secrets
 import signal
-import socket
 
 from bumble import hci
 from bumble.core import AdvertisingData, UUID
 from bumble.device import Device, DeviceConfiguration, Peer
 from bumble.pairing import PairingConfig, PairingDelegate
-from bumble.transport import open_transport
+from usb_service import open_driver_transport as open_transport
 from adapters import select_transport
 from hid_backend import MouseReports, KeyboardReports
 from pointer import Pointer, request_accessibility
 
-from runtime_paths import data_directory
-
-
-class SocketPointer:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        self.sock.connect(path)
-        self.sock.setblocking(False)
-        self.queue = asyncio.Queue(maxsize=1024)
-        self.failure = None
-        self.sender = asyncio.create_task(self.send_reports())
-
-    async def send_reports(self):
-        while True:
-            data = await self.queue.get()
-            try:
-                while True:
-                    try:
-                        await asyncio.get_running_loop().sock_sendall(self.sock, data)
-                        break
-                    except OSError as exc:
-                        # macOS can report ENOBUFS for a full Unix datagram
-                        # receive buffer. It is backpressure, not a dead peer.
-                        if exc.errno not in (errno.ENOBUFS, errno.EAGAIN, errno.EWOULDBLOCK):
-                            raise
-                        await asyncio.sleep(0.005)
-            except Exception as exc:
-                self.failure = exc
-            finally:
-                self.queue.task_done()
-
-    def apply(self, report):
-        if self.failure:
-            raise RuntimeError('Pointer helper disconnected') from self.failure
-        self.queue.put_nowait(json.dumps(report).encode())
-
-    def release(self):
-        if not self.failure:
-            self.apply({f'button{i + 1}': False for i in range(8)})
-
-    async def close(self):
-        try:
-            await asyncio.wait_for(self.queue.join(), 1)
-        except asyncio.TimeoutError:
-            pass
-        self.sender.cancel()
-        await asyncio.gather(self.sender, return_exceptions=True)
-        self.sock.close()
+from runtime_paths import data_directory, write_diagnostic
+from native_backend import call
+from native_sender import SocketPointer
 
 
 def configuration(classic_enabled=False):
     identity = data_directory() / 'driver-identity.json'
-    if not identity.exists():
-        config = {
-            'address': str(hci.Address.generate_static_address()),
-            'irk': secrets.token_hex(16),
-        }
-        identity.write_text(json.dumps(config))
-        identity.chmod(0o600)
-    config = json.loads(identity.read_text())
+    config = call('identity', {'path': str(identity)})
     return DeviceConfiguration(
         name='M196 Raw Host', address=hci.Address(config['address']),
         irk=bytes.fromhex(config['irk']), le_enabled=True, classic_enabled=classic_enabled,
@@ -144,7 +89,7 @@ async def use_mouse(device, address, args, pointer, observer=None):
         if not maps:
             raise RuntimeError('HID Report Map characteristic missing')
         descriptor = await maps[0].read_value()
-        (data_directory() / ('keyboard-report-map.hex' if keyboard else 'm196-report-map.hex')).write_text(descriptor.hex() + '\n')
+        write_diagnostic('keyboard-report-map.hex' if keyboard else 'm196-report-map.hex', descriptor.hex() + '\n')
         decoder = KeyboardReports(descriptor) if keyboard else MouseReports(descriptor)
         if keyboard and not any(field.page == 7 for fields in decoder.fields.values() for field in fields):
             raise RuntimeError('This HID device does not provide keyboard input')

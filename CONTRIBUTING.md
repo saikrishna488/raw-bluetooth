@@ -4,12 +4,15 @@ Raw Bluetooth is an experimental macOS userspace Bluetooth project. Read the [ar
 
 ## Local setup
 
-Follow the [README quick start](README.md#quick-start). Python dependencies belong in `.venv`; use the pinned requirements for reproducibility. Build Swift changes with `./gui/build.command`. This installs the app and updates its local signature, so do it on your development Mac with the checkout kept in place.
+Follow the [README quick start](README.md#quick-start). Python dependencies belong in `.venv`; use the pinned requirements for reproducibility. Build the native modules and USB broker with `.venv/bin/python native/build.py` before running a fresh source checkout. Build Swift changes with `./gui/build.command`. This installs the app and updates its local signature, so do it on your development Mac with the checkout kept in place.
 
 ## Validation
 
 ```sh
-.venv/bin/python -m unittest -v test_hid_mouse.py test_hid_keyboard.py test_gui_backend.py test_pointer.py
+.venv/bin/python native/build.py
+.venv/bin/python -m unittest discover -v
+c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer native/test_core.cpp -o build/native/test-core-sanitized
+build/native/test-core-sanitized
 xcrun swiftc -parse-as-library gui/PointerServer.swift gui/KeyboardOutput.swift gui/test_pointer_bounds.swift -o /tmp/raw-bt-pointer-bounds-tests -framework AppKit
 /tmp/raw-bt-pointer-bounds-tests
 .venv/bin/pip check
@@ -22,7 +25,7 @@ For Bluetooth or input changes, separately record manual results for discovery, 
 
 ## Change guidelines
 
-- Keep USB access in the privileged worker and desktop input output in the normal user's session.
+- Keep USB access in the native privileged broker and desktop input output in the normal user's session.
 - Preserve controller cleanup and the GUI heartbeat lease.
 - Keep pairing keys out of status events and avoid logging keyboard contents.
 - Keep the internal Lite-On radio excluded from default adapter selection.

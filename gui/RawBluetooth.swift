@@ -80,6 +80,46 @@ final class BluetoothModel: ObservableObject {
     @Published var loginEnabled = SMAppService.mainApp.status == .enabled
     @Published var loginNeedsApproval = SMAppService.mainApp.status == .requiresApproval
     @Published var loginError: String?
+    @Published var usbServiceAvailable = FileManager.default.fileExists(atPath: "/var/run/raw-bluetooth-\(getuid())/usb.sock")
+    @Published var installingUSBService = false
+
+    func installUSBService() {
+        guard !preview, !active, !installingUSBService else { return }
+        let installer = packagedWorker == nil
+            ? source.appendingPathComponent("packaging/usb-service-install.sh")
+            : Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/usb-service-install.sh")
+        let worker = packagedWorker == nil
+            ? source.appendingPathComponent("build/release/image/Raw Bluetooth.app/Contents/Helpers/backend.app")
+            : Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/backend.app")
+        guard FileManager.default.fileExists(atPath: worker.path) else {
+            fail("Build the packaged backend before installing USB access.")
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        let shell = "/bin/zsh \(shellQuote(installer.path)) install \(getuid()) \(shellQuote(worker.path)) \(shellQuote(dataDirectory.path))"
+        process.arguments = ["-e", "do shell script \(appleQuote(shell)) with administrator privileges"]
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                guard let self = self else { return }
+                self.installingUSBService = false
+                self.usbServiceAvailable = FileManager.default.fileExists(atPath: "/var/run/raw-bluetooth-\(getuid())/usb.sock")
+                if process.terminationStatus != 0 { self.fail("USB access installation failed. \(message.prefix(250))") }
+                else { self.log("USB service installed; administrator access is no longer needed for sessions") }
+            }
+        }
+        do {
+            installingUSBService = true
+            try process.run()
+        } catch {
+            installingUSBService = false
+            fail(error.localizedDescription)
+        }
+    }
 
     func refreshLoginStatus() {
         loginEnabled = SMAppService.mainApp.status == .enabled
@@ -200,6 +240,7 @@ final class BluetoothModel: ObservableObject {
 
     func start() {
         guard !preview, !active, backend == nil else { return }
+        usbServiceAvailable = FileManager.default.fileExists(atPath: "/var/run/raw-bluetooth-\(getuid())/usb.sock")
         do {
             // macOS sockaddr_un.sun_path is only 104 bytes. Keep IPC paths short.
             let folder = URL(fileURLWithPath: "/tmp").appendingPathComponent("raw-bt-" + UUID().uuidString)
@@ -230,8 +271,13 @@ final class BluetoothModel: ObservableObject {
             adapterTransport = ""
             let shell = "\(command) --transport \(shellQuote(transport)) --session \(shellQuote(folder.path)) > \(shellQuote(folder.appendingPathComponent("backend.log").path)) 2>&1"
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", "do shell script \(appleQuote(shell)) with administrator privileges"]
+            if usbServiceAvailable {
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-c", "exec " + shell]
+            } else {
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                process.arguments = ["-e", "do shell script \(appleQuote(shell)) with administrator privileges"]
+            }
             let errors = Pipe()
             process.standardError = errors
             process.standardOutput = FileHandle.nullDevice
@@ -260,8 +306,8 @@ final class BluetoothModel: ObservableObject {
             backend = process
             active = true
             phase = "starting"
-            status = "Authorize adapter access…"
-            log("Requesting access to the USB Bluetooth adapter")
+            status = usbServiceAvailable ? "Opening adapter…" : "Authorize adapter access…"
+            log(usbServiceAvailable ? "Connecting through the installed USB service" : "Requesting access to the USB Bluetooth adapter")
             try process.run()
             startHeartbeat(in: folder)
         } catch {
@@ -850,7 +896,7 @@ struct SettingsView: View {
                     Button("Open Login Items Settings") { SMAppService.openSystemSettingsLoginItems() }
                     Toggle("Start with the window hidden", isOn: $model.startHidden)
                     Toggle("Connect saved devices on launch", isOn: $model.connectOnLaunch)
-                    Text("Adapter access may ask for an administrator password when a new session starts.")
+                    Text("Install USB access below to connect automatically without repeated administrator prompts.")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(8)
             }
@@ -885,9 +931,11 @@ struct SettingsView: View {
             }
             GroupBox("Administrator access") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label(model.active && model.phase != "starting" ? "Adapter session active" : "Authorization required for a new session", systemImage: "lock.shield")
-                    Text("This build requests administrator access each time it starts the USB worker. Keeping it running in the background keeps that session available. Always-allowed access requires a separately installed, approved privileged helper; it is not available in this build. Your password is never stored.")
+                    Label(model.usbServiceAvailable ? "USB access installed" : "One-time USB access setup", systemImage: "lock.shield")
+                    Text("Install the USB service once with administrator approval. Later sessions run as your normal user and use the service for USB access. Your password is never stored. Reinstall after updating the app to update the service too.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Button(model.installingUSBService ? "Installing…" : model.usbServiceAvailable ? "Update USB access…" : "Install USB access…") { model.installUSBService() }
+                        .disabled(model.active || model.preview || model.installingUSBService)
                 }.padding(8)
             }
         }.padding(24)

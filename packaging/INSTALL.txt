@@ -1,4 +1,4 @@
-Raw Bluetooth 0.6.0 — experimental Intel macOS app
+Raw Bluetooth 0.7.0 — experimental Intel macOS app
 
 1. Drag Raw Bluetooth.app to Applications. Eject this disk image.
 2. Open the app from Applications.
@@ -8,8 +8,17 @@ Raw Bluetooth 0.6.0 — experimental Intel macOS app
    you trust. Some managed Macs may prevent opening unsigned apps.
 4. Allow Raw Bluetooth under Privacy & Security > Accessibility for mouse and
    keyboard input. Relaunch if necessary.
-5. Click Scan and authorize the USB worker when macOS requests administrator
-   access. Put your BLE mouse or keyboard into pairing mode.
+5. Open Settings > Authorization > Install USB access and approve the one-time
+   administrator request. Later sessions need no administrator authorization.
+   Click Scan and put your BLE mouse or keyboard into pairing mode.
+   Reinstall USB access after app updates to refresh the installed service.
+   Without installation, Scan still requests administrator access per session.
+
+USB access installs a native C++ launchd service restricted to your account.
+The app bundles the C++ backend and a Python/Bumble protocol bridge.
+No password is stored. To remove it after quitting the app, run in Terminal:
+sudo /bin/zsh "/Applications/Raw Bluetooth.app/Contents/Resources/usb-service-install.sh" uninstall "$(id -u)"
+Administrator approval is required for removal.
 
 No Python installation or source checkout is needed. Requires an Intel Mac,
 macOS 13 or later, a logged-in desktop session, and a supported external USB

@@ -1,4 +1,4 @@
-"""Privileged USB-HCI worker for the Raw Bluetooth desktop app.
+"""Async Bumble protocol bridge for the native Raw Bluetooth backend.
 
 The normal-user GUI writes a small command file. This worker publishes discovery
 and connection events to a separate JSONL file; neither channel exposes bond keys.
@@ -17,59 +17,27 @@ from bumble import hci
 from bumble.core import AdvertisingData
 from bumble.device import Device
 from bumble.pairing import PairingConfig, PairingDelegate
-from bumble.transport import open_transport
+from usb_service import open_driver_transport as open_transport
 from m196_driver import SocketPointer, configuration, use_mouse
 from saved_devices import SavedDevices
 from runtime_paths import data_directory
 from adapters import select_transport, migrate_bonds, forget_bond
 from bumble.keys import JsonKeyStore
 from audio_stream import A2DPTestTone, validate_audio_file
+from native_backend import call, EventJournal
 
 
 def advertisement_info(adv, previous=None):
-    previous = previous or {}
-    name = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME) or adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME) or previous.get('name', '')
+    name = adv.data.get(AdvertisingData.COMPLETE_LOCAL_NAME) or adv.data.get(AdvertisingData.SHORTENED_LOCAL_NAME) or ''
     if isinstance(name, bytes):
         name = name.decode('utf-8', 'replace')
-    # Appearance is a two-byte little-endian GAP value (0x03C2 = mouse).
-    appearance = previous.get('appearance', 0)
-    raw = adv.data_bytes
-    pos = 0
-    while pos < len(raw):
-        size = raw[pos]
-        if not size or pos + size >= len(raw):
-            break
-        if raw[pos + 1] == 0x19 and size >= 3:
-            appearance = int.from_bytes(raw[pos + 2:pos + 4], 'little')
-        pos += size + 1
-    lower_name = name.lower()
-    audio_name = any(word in lower_name for word in ('airpod', 'headphone', 'headset', 'earbud', 'speaker', 'buds'))
-    classic_available = bool(previous.get('classic_available', False))
-    category = ('Mouse' if appearance == 0x03c2 or 'm196' in lower_name or 'mouse' in lower_name
-                else 'Keyboard' if appearance == 0x03c1 or 'k250' in lower_name or 'keyboard' in lower_name
-                else 'Audio' if audio_name or previous.get('category') == 'Audio'
-                else 'BLE device')
-    return dict(address=str(adv.address), name=name, rssi=adv.rssi,
-                # Scan responses supplement the preceding advertisement.
-                connectable=bool(adv.is_connectable or classic_available or
-                                 (getattr(adv, "is_scan_response", False) and
-                                  previous.get("connectable", False))),
-                classic_available=classic_available,
-                appearance=appearance, category=category, last_seen=time.time())
+    return call('advertisement', {'previous': previous or {}, 'name': name, 'raw': list(adv.data_bytes),
+                                 'address': str(adv.address), 'rssi': adv.rssi, 'connectable': bool(adv.is_connectable),
+                                 'scan_response': bool(getattr(adv, 'is_scan_response', False)), 'now': time.time()})
 
 
 def read_command(path, last_id):
-    try:
-        if path.stat().st_size > 4096:
-            return None
-        command = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-    if not isinstance(command, dict) or not isinstance(command.get('id'), str) or command['id'] == last_id:
-        return None
-    if command.get('action') not in ('scan', 'pause', 'connect', 'disconnect', 'stop', 'remember', 'forget', 'audio_test', 'audio_play', 'audio_system', 'audio_disconnect'):
-        return None
-    return command
+    return call('command', {'path': str(path), 'last_id': last_id})
 
 
 class DisplayPasskey(PairingDelegate):
@@ -98,8 +66,7 @@ class DeviceOutput:
 class Backend:
     def __init__(self, folder, transport, saved_path=None):
         self.folder, self.transport_name = folder, transport
-        self.events = (folder / 'events.jsonl').open('a', buffering=1)
-        os.chmod(folder / 'events.jsonl', 0o644)
+        self.events = EventJournal(folder / 'events.jsonl')
         self.device = None
         self.devices, self.addresses, self.last_emitted = {}, {}, {}
         self.scanning = False
@@ -111,33 +78,10 @@ class Backend:
         self.manual_pause = set()
         self.retry_at, self.retry_count = {}, {}
         self.connecting_key = None
-        self.connected_keys = set()
-        self.pairing_codes = {}
         self.audio_tasks = {}
 
     def emit(self, state, **details):
-        key = details.get('address')
-        if state == 'connected':
-            self.connected_keys.add(key)
-        elif state == 'disconnected':
-            self.connected_keys.discard(key)
-        if state == 'passkey':
-            self.pairing_codes[key] = details.get('code')
-        elif state in ('connected', 'disconnected', 'discovering', 'error'):
-            self.pairing_codes.pop(key, None)
-        # Keep long-running sessions bounded, with a replayable current snapshot.
-        if self.events.tell() > 2 * 1024 * 1024:
-            self.events.seek(0)
-            self.events.truncate()
-            snapshot = [('device', info) for info in self.devices.values()]
-            snapshot += [('saved', info) for info in self.saved.devices.values()]
-            snapshot += [('connected', {'address': address}) for address in self.connected_keys]
-            if self.connecting_key:
-                snapshot.append(('connecting', {'address': self.connecting_key}))
-            snapshot += [('passkey', {'address': address, 'code': code}) for address, code in self.pairing_codes.items()]
-            for kind, info in snapshot:
-                self.events.write(json.dumps(dict(state=kind, time=time.time(), **info)) + '\n')
-        self.events.write(json.dumps(dict(state=state, time=time.time(), **details)) + '\n')
+        self.events.emit(state, details)
 
     def advertisement(self, adv):
         key = str(adv.address)
@@ -164,16 +108,11 @@ class Backend:
         name = data.get(AdvertisingData.COMPLETE_LOCAL_NAME) or data.get(AdvertisingData.SHORTENED_LOCAL_NAME) or ''
         if isinstance(name, bytes):
             name = name.decode('utf-8', 'replace')
-        major_class = (class_of_device >> 8) & 0x1F
-        audio_name = any(word in name.lower() for word in ('airpod', 'headphone', 'headset', 'earbud', 'speaker', 'buds'))
-        # Avoid listing arbitrary nearby computers/phones as audio sinks.
-        if major_class != 4 and not audio_name:
-            return
         key = str(address)
-        info = dict(address=key, name=name, rssi=rssi, connectable=True,
-                    classic_available=True, appearance=0, category='Audio', last_seen=time.time())
-        self.devices[key], self.addresses[key] = info, address
-        self.emit('device', **info)
+        info = call('inquiry', {'name': name, 'address': key, 'class': class_of_device, 'rssi': rssi, 'now': time.time()})
+        if info is not None:
+            self.devices[key], self.addresses[key] = info, address
+            self.emit('device', **info)
 
     async def audio_test(self, key, audio_file=None, system_fifo=None):
         if key not in self.addresses or self.devices.get(key, {}).get('category') != 'Audio':
@@ -260,13 +199,10 @@ class Backend:
                 await self.device.start_discovery(auto_restart=False)
 
     def expire_devices(self):
-        # Saved devices stay visible as offline rows for reconnection.
-        now = time.time()
-        for key, info in list(self.devices.items()):
-            if key not in self.saved.devices and now - info.get('last_seen', 0) > 30:
-                self.devices.pop(key, None)
-                self.addresses.pop(key, None)
-                self.emit('device_removed', address=key)
+        for key in call('expire', {'devices': self.devices, 'saved': self.saved.devices, 'now': time.time()}):
+            self.devices.pop(key, None)
+            self.addresses.pop(key, None)
+            self.emit('device_removed', address=key)
 
     async def stop_classic_inquiry(self):
         if self.device and self.device.discovering:
@@ -331,11 +267,9 @@ class Backend:
         self.emit('saved', **record)
 
     def reconnect_candidates(self, now=None):
-        now = time.time() if now is None else now
-        return [key for key, info in self.saved.devices.items()
-                if info['auto_reconnect'] and key not in self.manual_pause
-                and key not in self.connection_tasks and now >= self.retry_at.get(key, 0)
-                and self.devices.get(key, {}).get('last_seen', 0) > now - 15]
+        return call('reconnect', {'now': time.time() if now is None else now, 'saved': self.saved.devices,
+                                  'devices': self.devices, 'paused': list(self.manual_pause),
+                                  'tasks': list(self.connection_tasks), 'retry_at': self.retry_at})
 
     async def auto_reconnect(self):
         if self.stopping or not self.scanning or self.connecting_key or not (self.folder / 'pointer.sock').exists():

@@ -1,6 +1,6 @@
 import json
 import asyncio
-import errno
+import socket
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -56,79 +56,78 @@ class DiscoveryTests(unittest.TestCase):
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_generic_mouse_and_keyboard_keep_delivering_after_congestion(self):
-        # Exercise the same per-device forwarding used for every BLE HID brand,
-        # including keyboard key-up and per-device release packets.
-        delivered = []
-        attempts = 0
-
-        async def send(sock, data):
-            nonlocal attempts
-            attempts += 1
-            if attempts % 3:
-                raise OSError(errno.ENOBUFS, 'temporary socket congestion')
-            delivered.append(json.loads(data))
-
-        loop = asyncio.get_running_loop()
-        outputs = []
-        with patch('m196_driver.socket.socket') as socket_factory, patch.object(loop, 'sock_sendall', send):
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.bind(path)
+            receiver.setblocking(False)
+            delivered = []
+            async def receive():
+                for _ in range(6):
+                    delivered.append(json.loads(await asyncio.get_running_loop().sock_recv(receiver, 4096)))
+            reader = asyncio.create_task(receive())
+            outputs = []
+            expected = []
             try:
                 for address, reports in (
                     ('generic-mouse', [{'x': 3, 'y': -2, 'button1': True}, {'button1': False, 'wheel': 1}]),
                     ('generic-keyboard', [{'kind': 'keyboard', 'keys': [4], 'consumer': []},
                                           {'kind': 'keyboard', 'keys': [], 'consumer': []}]),
                 ):
-                    output = DeviceOutput('/unused-test-socket', address)
+                    output = DeviceOutput(path, address)
                     outputs.append(output)
                     for report in reports:
                         output.apply(report)
                     output.release()
-                    await asyncio.wait_for(output.output.queue.join(), 1)
-                    self.assertIsNone(output.output.failure)
-                    self.assertEqual(delivered[-3:], [dict(report, device=address) for report in reports]
-                                     + [{'kind': 'release', 'device': address}])
-                self.assertEqual(socket_factory.call_count, 2)
+                    self.assertTrue(await output.output.drain())
+                    expected.extend([dict(report, device=address) for report in reports]
+                                    + [{'kind': 'release', 'device': address}])
+                await asyncio.wait_for(reader, 2)
+                self.assertEqual(delivered, expected)
             finally:
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
                 for output in outputs:
                     await output.close()
+                receiver.close()
 
     async def test_input_sender_recovers_from_temporary_socket_congestion(self):
-        sender = SocketPointer.__new__(SocketPointer)
-        sender.sock = object()
-        sender.queue = asyncio.Queue()
-        sender.failure = None
-        send = AsyncMock(side_effect=[OSError(errno.ENOBUFS, 'full'), None, None])
-        loop = asyncio.get_running_loop()
-        with patch.object(loop, 'sock_sendall', send):
-            task = asyncio.create_task(sender.send_reports())
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            receiver.bind(path)
+            receiver.setblocking(False)
+            sender = SocketPointer(path)
             try:
-                sender.apply({'x': 1})
-                sender.apply({'x': 2})
-                await asyncio.wait_for(sender.queue.join(), 1)
-                self.assertIsNone(sender.failure)
-                self.assertEqual(send.await_count, 3)
-                packets = [call.args[1] for call in send.await_args_list]
-                self.assertEqual(packets[0], packets[1])
-                self.assertEqual(json.loads(packets[2]), {'x': 2})
+                for i in range(200):
+                    sender.apply({'x': i, 'padding': 'x' * 128})
+                # Delay reads to exercise native ENOBUFS/EAGAIN retry logic.
+                await asyncio.sleep(0.05)
+                delivered = []
+                for _ in range(200):
+                    data = await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 2)
+                    delivered.append(json.loads(data)['x'])
+                self.assertTrue(await sender.drain())
+                self.assertEqual(delivered, list(range(200)))
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await sender.close()
+                receiver.close()
 
     async def test_input_sender_reports_a_dead_socket(self):
-        sender = SocketPointer.__new__(SocketPointer)
-        sender.sock = object()
-        sender.queue = asyncio.Queue()
-        sender.failure = None
-        loop = asyncio.get_running_loop()
-        with patch.object(loop, 'sock_sendall', AsyncMock(side_effect=ConnectionRefusedError())):
-            task = asyncio.create_task(sender.send_reports())
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.bind(path)
+            sender = SocketPointer(path)
+            receiver.close()
             try:
                 sender.apply({'x': 1})
-                await asyncio.wait_for(sender.queue.join(), 1)
+                self.assertTrue(await sender.drain())
                 with self.assertRaisesRegex(RuntimeError, 'Pointer helper disconnected'):
                     sender.apply({'x': 2})
             finally:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await sender.close()
 
     async def test_disconnect_keyboard_keeps_mouse_task(self):
         with tempfile.TemporaryDirectory() as tmp:

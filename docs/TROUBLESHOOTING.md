@@ -10,13 +10,13 @@
 | Build on Apple Silicon | The supplied script targets Intel x86_64. Native arm64 support has not been validated. |
 | Signing fails | Keep the local `.signing/` directory intact and inspect the specific `security`/`codesign` error. Do not share its password or keychain. |
 
-The installed app depends on this checkout and its virtual environment. Copying only the `.app` to another Mac is not a supported installation method.
+Development builds depend on this checkout and its virtual environment. The release DMG bundles the Swift GUI, C++ backend, and Python/Bumble runtime and can be installed without a checkout. Run `.venv/bin/python native/build.py` if a source build reports a missing `_driver_native` module.
 
 ## Adapter cannot be opened
 
-Confirm the external device appears in macOS **System Information → USB**, with vendor/product ID `0a12:0001`. The GUI defaults to that ID; it does not fall back to the internal Lite-On radio. A different dongle is not automatically supported.
+Confirm the external device appears in macOS **System Information → USB**. The app detects standard external HCI controllers and excludes internal/unknown radios and ambiguous duplicate USB IDs. With several adapters, choose one in Settings. USB `0a12:0001` is the hardware-verified controller.
 
-Release the adapter in the GUI and stop any CLI session before another tool tries to claim it. Authenticate when macOS requests administrator access. If a previous session crashed, wait for its heartbeat lease cleanup, then restart the session. If macOS or the app still cannot reclaim the controller, unplug/replug the dongle.
+Release the adapter in the GUI and stop any CLI session before another tool tries to claim it. Install/update USB access once in Settings to avoid per-session administrator prompts. After upgrading to 0.7.0, update USB access to replace the Python broker with the native C++ service. If a previous session crashed, wait for its heartbeat lease cleanup, then restart the session. If macOS or the app still cannot reclaim the controller, unplug/replug the dongle.
 
 Only one stack can use the adapter at a time. Devices managed by macOS on that same adapter cannot use it concurrently with Raw Bluetooth.
 

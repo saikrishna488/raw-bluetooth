@@ -1,6 +1,6 @@
 # Raw Bluetooth for macOS
 
-Current version: **0.6.0** (build 9).
+Current version: **0.7.0** (build 10).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
@@ -10,9 +10,9 @@ Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for 
 
 ## Install the compiled app
 
-Download the Intel `.dmg` from [GitHub Releases](https://github.com/saikrishna488/raw-bluetooth/releases), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
+Download the Intel `.dmg` from [the v0.7.0 release](https://github.com/saikrishna488/raw-bluetooth/releases/tag/v0.7.0), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
 
-This preview is ad-hoc signed and **not notarized**. If macOS blocks opening, use **System Settings → Privacy & Security → Open Anyway** after attempting to launch it. Grant **Accessibility** permission and approve the administrator request when starting a USB session. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
+This preview is ad-hoc signed and **not notarized**. If macOS blocks opening, use **System Settings → Privacy & Security → Open Anyway** after attempting to launch it. Grant **Accessibility** permission and install USB access once in Settings. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
 
 The installed app keeps pairing keys and preferences in `~/Library/Application Support/Raw Bluetooth`. Development-checkout pairings are not automatically migrated. See [installation and limitations](packaging/INSTALL.txt). Source setup remains available below.
 
@@ -77,6 +77,7 @@ cd raw-bluetooth
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/pip install -r requirements-lock.txt
+.venv/bin/python native/build.py
 ./gui/build.command
 open "$HOME/Applications/Raw Bluetooth.app"
 ```
@@ -85,7 +86,7 @@ The build installs the app in `~/Applications` and creates a private local devel
 
 1. Plug in the dongle and open **Raw Bluetooth**.
 2. In **System Settings → Privacy & Security → Accessibility**, grant **Raw Bluetooth** permission.
-3. Click **Scan devices** and authenticate in the administrator dialog.
+3. In **Settings → Authorization**, click **Install USB access…** and approve the one-time administrator request. Then click **Scan devices**.
 4. Put the mouse or keyboard into Bluetooth pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
 5. For keyboard passkey pairing, type the displayed six-digit code on the keyboard being paired and press Enter.
 6. Keep the app running. Use **Release adapter** when finished.
@@ -98,13 +99,15 @@ Open **Settings** with the gear button, the app menu (⌘,), or the menu bar ico
 
 - **Launch at login** registers Raw Bluetooth with macOS Login Items. If macOS requires approval, open Login Items Settings from this page.
 - **Start with the window hidden** opens the app without its main window. The menu bar icon remains available.
-- **Connect saved devices on launch** starts an adapter session for devices with automatic reconnection enabled. Starting a new session may display an administrator prompt.
+- **Connect saved devices on launch** starts an adapter session for devices with automatic reconnection enabled. With USB access installed, new sessions need no administrator prompt.
 - **Keep running when the window closes** keeps device input and the authorized worker running after closing the main window. This defaults to on. Reopen from the menu bar icon or Dock. Turn it off to quit when closing the main window.
 - **Scroll page length**, under **Settings → Scrolling**, sets 1–30 lines per vertical wheel step. It combines with the sidebar's Scroll Speed, applies immediately to all connected mice, and is saved across launches. The default is 1 line; applications control the actual height of a line. Horizontal scrolling keeps its existing speed.
 
 **Quit Raw Bluetooth** stops the worker and releases the adapter. Background operation requires a logged-in user; it does not provide login-screen input or operation after logout.
 
-This build does not offer permanent administrator authorization. It requests authorization when launching its USB worker and never stores your password. A persistent privileged service would require a separately packaged and approved helper. Keeping the app running avoids restarting the worker just to close and reopen its window.
+**Install USB access…** installs a root-owned, self-contained USB service through launchd, approved once. Subsequent GUI and mouse CLI sessions run as your normal user and connect through an account-restricted Unix socket. No password is stored and no sudoers rules are added. Without installation, the existing per-session authorization remains available.
+
+For a development checkout, build the packaged app with `.venv/bin/python packaging/build_release.py`, then run `./Install\ USB\ Access.command`. Reinstall after app updates to refresh the service. To remove it, quit the driver and run `./Uninstall\ USB\ Access.command`; removal needs administrator approval. The service persists across reboots but provides no input until the desktop app or CLI connects.
 
 ## Documentation
 
@@ -132,27 +135,25 @@ Bluetooth functionality uses [Google Bumble](https://github.com/google/bumble), 
 
 Bundled Atheros firmware retains its [vendor license](firmware/LICENCE.atheros_firmware), with origin URLs and SHA-256 hashes in [firmware/manifest.json](firmware/manifest.json). Those terms apply to the firmware. This repository does not currently declare a license for its original source code.
 
-### C++ HID decoder
+### C++ backend and HID decoder
 
-Build the native parser and decoder using the same Python interpreter that runs
-Raw Bluetooth (requires Xcode Command Line Tools on macOS):
+Build the native backend and HID decoder using the Python interpreter that runs the Bumble bridge:
 
 ```sh
 .venv/bin/python native/build.py
-.venv/bin/python -m unittest discover -v
+.venv/bin/python -m unittest discover
 .venv/bin/python native/benchmark.py
 ```
 
-The backend automatically uses the compiled C++17 extension when present. Rebuild
-it after changing Python versions or CPU architecture. Set
-`RAW_BLUETOOTH_PYTHON_HID=1` to select the Python reference implementation.
-Without the extension, source checkouts continue using Python. Release builds
-compile and bundle the native decoder and verify its selection during self-test.
+The C++ backend handles USB access, adapter discovery, classification, reconnect policy, private state, event logging, and input delivery. Python remains for Bumble protocol operations and asynchronous session management. The Swift GUI is unchanged. See [how the native bridge works](docs/NATIVE_BRIDGE.md) for the boundaries and build details.
 
-This is a partial native migration: HID descriptor parsing and per-report field
-extraction/decoding run in C++; keyboard state aggregation and Bluetooth session
-management still use Python/Bumble. The desktop UI and input output use Swift.
-The benchmark measures decoding only, not end-to-end input latency. USB pairing,
-A2DP, and packaged app installation still require hardware testing.
+To compile an installable Intel macOS app and DMG:
 
-For experimental system audio routing, select a Classic audio device and choose **Route system audio**. macOS may ask for Screen & System Audio Recording permission. **Disconnect audio** stops the route. Audio output quality and latency depend on the adapter and A2DP sink; microphone input is not provided.
+```sh
+.venv/bin/python packaging/build_release.py
+.venv/bin/python packaging/verify_release.py dist/Raw-Bluetooth-0.7.0-macOS-Intel.dmg
+```
+
+Install/update USB access once in Settings after upgrading to the C++ broker. Launchd runs the native service directly, and later driver sessions need no administrator prompt. The app bundles its own Python/Bumble runtime; the destination Mac needs no Python installation. This remains an ad-hoc-signed, non-notarized preview.
+
+For experimental system audio routing, select a Classic audio device and choose **Route system audio**. macOS may ask for Screen & System Audio Recording permission. **Disconnect audio** stops the route. Microphone input is not provided.

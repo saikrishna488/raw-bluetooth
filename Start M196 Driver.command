@@ -17,7 +17,12 @@ for attempt in {1..50}; do
     sleep 0.1
 done
 [[ -f pointer.ready ]] || exit 1
-echo 'Starting M196 driver. Authenticate in the macOS dialog. Ctrl-C stops it.'
+if .venv/bin/python -c 'from usb_service import service_installed; raise SystemExit(not service_installed())'; then
+    echo 'Starting M196 driver with installed USB access. Ctrl-C stops it.'
+    .venv/bin/python -u m196_driver.py --event-socket "$PWD/pointer.sock" --stop-file "$stop_file" --duration 86400 > "$PWD/driver-live.log" 2>&1
+    exit
+fi
+echo 'Starting M196 driver. Install USB Access once to avoid future admin prompts. Ctrl-C stops it.'
 osascript - "$PWD" <<'APPLESCRIPT'
 on run argv
     set driverFolder to item 1 of argv

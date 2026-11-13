@@ -48,8 +48,11 @@ def main():
         '--specpath', BUILD, '--paths', ROOT,
         '--collect-all', 'bumble', '--collect-all', 'libusb_package',
         '--exclude-module', 'imageio_ffmpeg', '--add-binary', f'{ffmpeg}:.',
+        '--add-binary', f'{ROOT / "build/native/raw-bluetooth-usb"}:native',
+        '--add-binary', f'{ROOT / "build/native/libusb-1.0.dylib"}:native',
         '--copy-metadata', 'bumble',
         '--hidden-import', '_hid_native', '--hidden-import', 'native_hid',
+        '--hidden-import', '_driver_native',
         '--hidden-import', 'gui_backend', ROOT / 'packaging/backend_entry.py')
     helpers = app / 'Contents/Helpers'
     helpers.mkdir()
@@ -58,6 +61,8 @@ def main():
     shutil.copytree(ROOT / 'firmware', resources / 'firmware')
     notices = resources / 'ThirdPartyNotices'
     notices.mkdir()
+    shutil.copy2(ROOT / 'native/vendor/nlohmann/LICENSE.MIT', notices / 'nlohmann-json-LICENSE.MIT')
+    shutil.copy2(ROOT / 'native/vendor/README.md', notices / 'native-dependencies.md')
     shutil.copy2(ffmpeg_source, notices / ffmpeg_source.name)
     shutil.copy2(ffmpeg.parent / 'COPYING.LGPLv2.1', notices / 'FFmpeg-COPYING.LGPLv2.1')
     shutil.copy2(ROOT / 'packaging/build_ffmpeg.py', notices / 'build_ffmpeg.py')
@@ -89,6 +94,7 @@ def main():
     (notices / 'dependencies.json').write_text(json.dumps(records, indent=2))
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', app.parent / 'READ ME FIRST.txt')
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', resources / 'INSTALL.txt')
+    shutil.copy2(ROOT / 'packaging/usb-service-install.sh', resources / 'usb-service-install.sh')
     run('xcrun', 'swiftc', '-O', '-parse-as-library', 'gui/RawBluetooth.swift',
         'gui/PointerServer.swift', 'gui/KeyboardOutput.swift', 'gui/SystemAudioCapture.swift', '-o', macos / 'RawBluetooth',
         '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
