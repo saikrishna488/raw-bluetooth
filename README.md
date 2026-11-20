@@ -6,9 +6,9 @@
 
 ![Raw Bluetooth app interface](gui/window-preview.png)
 
-> **No Accessibility permission for mouse or keyboard input. No administrator prompt for normal driver sessions after the one-time USB access setup.** Input is delivered through the logged-in user's **CoreGraphics** session, without a kernel extension or Apple virtual-HID entitlement.
+> **Accessibility permission is required for mouse and keyboard input.** After the one-time USB access setup, normal driver sessions need no administrator prompt. Input is delivered through the logged-in user’s **CoreGraphics** session, without a kernel extension or Apple virtual-HID entitlement.
 
-Current version: **0.7.0** (build 10).
+Current version: **0.7.1** (build 11).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
@@ -20,9 +20,9 @@ The app bundle includes the dark-emerald icon linked above. Finder may need a re
 
 ## Install the compiled app
 
-Download the Intel `.dmg` from [the v0.7.0 release](https://github.com/saikrishna488/raw-bluetooth/releases/tag/v0.7.0), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
+Download the Intel `.dmg` from [the v0.7.1 release](https://github.com/saikrishna488/raw-bluetooth/releases/tag/v0.7.1), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
 
-Mouse and keyboard input uses CoreGraphics in the logged-in desktop session and does **not** require Accessibility permission. Once the USB access service has been installed with one-time administrator approval, normal driver sessions do **not** require administrator authentication. No Apple virtual-HID entitlement is required. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
+Mouse and keyboard input uses CoreGraphics in the logged-in desktop session and requires Accessibility permission. Once the USB access service has been installed with one-time administrator approval, normal driver sessions do **not** require administrator authentication. No Apple virtual-HID entitlement is required. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
 
 The installed app keeps pairing keys and preferences in `~/Library/Application Support/Raw Bluetooth`. Development-checkout pairings are not automatically migrated. See [installation and limitations](packaging/INSTALL.txt). Source setup remains available below.
 
@@ -37,6 +37,14 @@ python3 -m venv .venv
 ```
 
 Set `RAW_BT_BUNDLE_IDENTIFIER`, `RAW_BT_SIGN_IDENTITY`, and `RAW_BT_NOTARY_PROFILE` for the Apple team before building. The verified, notarized DMG and SHA-256 checksum appear in `dist/`. This does not replace your installed development app or use its local signing key.
+
+To create a manually uploaded, ad-hoc-signed preview DMG without an Apple Developer ID, run:
+
+```sh
+.venv/bin/python packaging/build_release.py --unsigned
+```
+
+Preview users must Control-click the app and choose **Open** on first launch to bypass Gatekeeper. They must also grant Accessibility permission before connecting a mouse or keyboard.
 
 ## GUI preview
 
