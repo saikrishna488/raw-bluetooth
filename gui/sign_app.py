@@ -26,6 +26,16 @@ def run(args, data=None):
 
 def sign(app):
     os.umask(0o077)
+    production_identity = os.environ.get('RAW_BT_SIGN_IDENTITY')
+    if production_identity:
+        entitlements = Path(os.environ.get('RAW_BT_ENTITLEMENTS', ROOT / 'gui/RawBluetooth.entitlements'))
+        if not entitlements.is_file():
+            raise RuntimeError('Virtual-HID entitlements file is missing')
+        run(['/usr/bin/codesign', '--force', '--sign', production_identity, '--options', 'runtime', '--timestamp',
+             '--entitlements', str(entitlements), str(app)])
+        run(['/usr/bin/codesign', '--verify', '--strict', str(app)])
+        print('Signed with configured Apple Developer ID identity')
+        return
     FOLDER.mkdir(mode=0o700, exist_ok=True)
     password_file = FOLDER / 'keychain-password'
     if not password_file.exists():

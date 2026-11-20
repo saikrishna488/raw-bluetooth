@@ -27,9 +27,11 @@ enum PointerBounds {
 
 /// Unprivileged native pointer output. The USB worker sends decoded HID reports.
 final class PointerServer {
+    private static let maximumMotionAgeNanoseconds: UInt64 = 50_000_000
     private let descriptor: Int32
     private let source: DispatchSourceRead
-    private let queue = DispatchQueue(label: "local.rawbluetooth.pointer")
+    private let queue = DispatchQueue(label: "local.rawbluetooth.pointer", qos: .userInteractive)
+    private let diagnosticsHandler: ((InputDiagnostics) -> Void)?
     private let path: String
     private var buttons = [Bool](repeating: false, count: 8)
     private var stopped = false
@@ -45,11 +47,21 @@ final class PointerServer {
     private var clickTimes = [TimeInterval](repeating: 0, count: 8)
     private var clickPositions = [CGPoint](repeating: .zero, count: 8)
     private var clickCounts = [Int64](repeating: 1, count: 8)
+    private var cachedDisplays = [CGRect]()
+    private var displayCacheTime: TimeInterval = 0
+    private var diagnosticsEnabled: Bool
+    private var latestMotionAgeMilliseconds = 0
+    private var staleMotionDrops = 0
+    private var largestReadBatch = 0
+    private var lastDiagnosticsEmission: TimeInterval = 0
 
-    init(path: String, sensitivity: Double = 1.0, scrollSensitivity: Double = 1.0, scrollPageLength: Double = 1.0) throws {
+    init(path: String, sensitivity: Double = 1.0, scrollSensitivity: Double = 1.0, scrollPageLength: Double = 1.0,
+         diagnosticsEnabled: Bool = false, diagnosticsHandler: ((InputDiagnostics) -> Void)? = nil) throws {
         guard AXIsProcessTrusted() else { throw NSError(domain: "RawBluetooth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Allow Raw Bluetooth in Accessibility to enable mouse control."]) }
         self.scrollPageLength = CGFloat(min(30, max(1, scrollPageLength)))
         self.path = path
+        self.diagnosticsEnabled = diagnosticsEnabled
+        self.diagnosticsHandler = diagnosticsHandler
         self.sensitivity = CGFloat(min(4.0, max(0.5, sensitivity)))
         self.scrollSensitivity = CGFloat(min(4.0, max(0.5, scrollSensitivity)))
         let bytes = Array(path.utf8CString)
@@ -82,13 +94,86 @@ final class PointerServer {
 
     private func read() {
         var buffer = [UInt8](repeating: 0, count: 4096)
+        var pendingMotion: [String: Any]?
+        var readCount = 0
+        func flushMotion() {
+            if let motion = pendingMotion {
+                self.apply(motion)
+                pendingMotion = nil
+            }
+        }
         while !stopped {
             let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
             if count < 0 { break }
             if count == 0 { continue }
             guard let report = try? JSONSerialization.jsonObject(with: Data(buffer.prefix(count))) as? [String: Any] else { continue }
-            apply(report)
+            readCount += 1
+            guard motionOnly(report) else {
+                flushMotion()
+                apply(report)
+                continue
+            }
+            if let timing = motionTiming(report) {
+                latestMotionAgeMilliseconds = Int(timing.age / 1_000_000)
+                if timing.timestamp < timing.now && timing.now - timing.timestamp > Self.maximumMotionAgeNanoseconds {
+                    // Do not replay relative movement accumulated while macOS
+                    // was busy. Controls continue through the ordered path.
+                    staleMotionDrops += 1
+                    continue
+                }
+            }
+            if let existing = pendingMotion, existing["device"] as? String != report["device"] as? String {
+                flushMotion()
+            }
+            mergeMotion(report, into: &pendingMotion)
         }
+        flushMotion()
+        largestReadBatch = max(largestReadBatch, readCount)
+        publishDiagnosticsIfNeeded()
+    }
+
+    private func motionOnly(_ report: [String: Any]) -> Bool {
+        guard report["kind"] == nil,
+              !report.keys.contains(where: { $0.hasPrefix("button") }) else { return false }
+        return ["x", "y", "wheel", "pan"].contains { report[$0] != nil }
+    }
+
+    private func mergeMotion(_ report: [String: Any], into pending: inout [String: Any]?) {
+        guard var merged = pending else { pending = report; return }
+        for key in ["x", "y", "wheel", "pan"] where report[key] != nil {
+            let value = amount(report, key)
+            let prior = amount(merged, key)
+            merged[key] = max(Int64(-32768), min(Int64(32767), prior + value))
+        }
+        pending = merged
+    }
+
+    private func motionTiming(_ report: [String: Any]) -> (timestamp: UInt64, now: UInt64, age: UInt64)? {
+        guard let number = report["motion_timestamp_ns"] as? NSNumber,
+              number.int64Value > 0 else { return nil }
+        let timestamp = UInt64(number.int64Value)
+        let now = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
+        return (timestamp, now, timestamp >= now ? 0 : now - timestamp)
+    }
+
+    private func publishDiagnosticsIfNeeded() {
+        guard diagnosticsEnabled, let diagnosticsHandler else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastDiagnosticsEmission >= 1 else { return }
+        lastDiagnosticsEmission = now
+        diagnosticsHandler(InputDiagnostics(latestMotionAgeMilliseconds: latestMotionAgeMilliseconds,
+                                            staleMotionDrops: staleMotionDrops,
+                                            largestReadBatch: largestReadBatch))
+        largestReadBatch = 0
+    }
+
+    private func activeDisplays() -> [CGRect] {
+        let now = ProcessInfo.processInfo.systemUptime
+        if cachedDisplays.isEmpty || now - displayCacheTime >= 1 {
+            cachedDisplays = PointerBounds.displays()
+            displayCacheTime = now
+        }
+        return cachedDisplays
     }
 
     private func amount(_ report: [String: Any], _ key: String) -> Int64 {
@@ -119,6 +204,13 @@ final class PointerServer {
         }
     }
 
+    func setDiagnosticsEnabled(_ enabled: Bool) {
+        queue.async {
+            self.diagnosticsEnabled = enabled
+            self.lastDiagnosticsEmission = 0
+        }
+    }
+
     private func apply(_ report: [String: Any]) {
         let device = report["device"] as? String ?? "default"
         if report["kind"] as? String == "keyboard" {
@@ -146,7 +238,7 @@ final class PointerServer {
         let dy = Int64(rawY.rounded(.toNearestOrAwayFromZero))
         movementRemainderX = rawX - CGFloat(dx)
         movementRemainderY = rawY - CGFloat(dy)
-        let displays = PointerBounds.displays()
+        let displays = activeDisplays()
         let origin = PointerBounds.clamp(point, to: displays)
         let proposed = CGPoint(x: origin.x + CGFloat(dx), y: origin.y + CGFloat(dy))
         point = PointerBounds.clamp(proposed, to: displays)

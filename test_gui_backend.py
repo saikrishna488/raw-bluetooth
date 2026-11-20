@@ -55,6 +55,59 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mouse_motion_and_scroll_are_coalesced(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.bind(path)
+            receiver.setblocking(False)
+            output = DeviceOutput(path, 'mouse')
+            try:
+                output.apply({'x': 2, 'y': -1})
+                output.apply({'x': 3, 'wheel': 2})
+                report = json.loads(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
+                timestamp = report.pop('motion_timestamp_ns')
+                self.assertIsInstance(timestamp, int)
+                self.assertGreater(timestamp, 0)
+                self.assertEqual(report, {'x': 5, 'y': -1, 'wheel': 2, 'device': 'mouse'})
+            finally:
+                await output.close()
+                receiver.close()
+
+    async def test_unchanged_buttons_do_not_prevent_motion_coalescing(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.bind(path)
+            receiver.setblocking(False)
+            output = DeviceOutput(path, 'mouse')
+            try:
+                output.apply({'x': 2, 'button1': False})
+                output.apply({'x': 3, 'wheel': 2, 'button1': False})
+                report = json.loads(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
+                self.assertGreater(report.pop('motion_timestamp_ns'), 0)
+                self.assertEqual(report, {'x': 5, 'wheel': 2, 'device': 'mouse'})
+            finally:
+                await output.close()
+                receiver.close()
+
+    async def test_button_transition_flushes_prior_motion_in_order(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            receiver.bind(path)
+            receiver.setblocking(False)
+            output = DeviceOutput(path, 'mouse')
+            try:
+                output.apply({'x': 4, 'button1': False})
+                output.apply({'button1': True})
+                reports = [json.loads(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1)) for _ in range(2)]
+                self.assertGreater(reports[0].pop('motion_timestamp_ns'), 0)
+                self.assertEqual(reports, [{'x': 4, 'device': 'mouse'}, {'button1': True, 'device': 'mouse'}])
+            finally:
+                await output.close()
+                receiver.close()
+
     async def test_generic_mouse_and_keyboard_keep_delivering_after_congestion(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
             path = str(Path(folder) / 'pointer.sock')
@@ -91,7 +144,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                     await output.close()
                 receiver.close()
 
-    async def test_input_sender_recovers_from_temporary_socket_congestion(self):
+    async def test_input_sender_discards_stale_motion_when_congested(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
             path = str(Path(folder) / 'pointer.sock')
             receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -101,15 +154,16 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             sender = SocketPointer(path)
             try:
                 for i in range(200):
-                    sender.apply({'x': i, 'padding': 'x' * 128})
-                # Delay reads to exercise native ENOBUFS/EAGAIN retry logic.
+                    sender.apply({'x': i, 'padding': 'x' * 128}, coalescible=True)
+                # Delay reads to force the sender to replace stale motion.
                 await asyncio.sleep(0.05)
                 delivered = []
-                for _ in range(200):
+                while not delivered or delivered[-1] != 199:
                     data = await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 2)
                     delivered.append(json.loads(data)['x'])
                 self.assertTrue(await sender.drain())
-                self.assertEqual(delivered, list(range(200)))
+                self.assertLessEqual(len(delivered), 32)
+                self.assertEqual(delivered[-1], 199)
             finally:
                 await sender.close()
                 receiver.close()

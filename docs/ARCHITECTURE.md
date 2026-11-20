@@ -16,23 +16,23 @@ flowchart LR
 
 ## Desktop session
 
-`gui/RawBluetooth.swift` presents discovery, connection state, pairing prompts, saved devices, and speed controls. After one-time USB service installation, it launches `gui_backend.py` as the desktop user. Without the service, it retains per-session administrator authorization. Commands travel through a session command file; discovery and status events return through JSONL. The native app receives input reports through its pointer server and posts native mouse/keyboard events without running the GUI as root.
+`gui/RawBluetooth.swift` presents discovery, connection state, pairing prompts, saved devices, and speed controls. After one-time USB service installation, it launches `gui_backend.py` as the desktop user. Without the service, it retains per-session administrator authorization. Commands, status events, and heartbeat renewals use a token-authenticated loopback connection and remain in RAM; there is no session command file, event journal, or backend log. The native app posts input through CoreGraphics in the logged-in desktop session, which requires Accessibility authorization.
 
 The backend uses `adapters.select_transport()` to select a single external standard USB HCI adapter or validate an explicit VID/PID. It reads macOS USB topology, excludes internal/unknown controllers and duplicate identities, and checks the HCI interface and event/ACL endpoints without claiming the controller. Vendor firmware loading is not provided. The desktop app stores an optional USB ID selection in UserDefaults. The backend then opens Bumble's HCI transport, and creates a Bluetooth device with the persisted host identity. It handles BLE advertisements, Classic inquiry, pairing, connections, and reconnection scheduling. Input connections discover the HID service, parse its report map, and subscribe to relevant report characteristics.
 
 The GUI provides a menu bar icon and can keep running after its main window closes. This preserves the worker and native input output in the logged-in user session. Startup and background preferences are stored in macOS UserDefaults; launch at login is registered through `SMAppService.mainApp` and remains subject to macOS approval. Settings can install a persistent privileged C++ USB broker (`native/usb_service.cpp`) from the packaged app. `usb_service.py` is now only its unprivileged Bumble transport adapter. The installer copies its complete runtime to a root-owned directory under `/Library/PrivilegedHelperTools`, rejects external symlinks, and registers a launchd daemon. An owner-only Unix socket and kernel peer credentials restrict access to the installing account. Requests accept only validated external USB VID/PIDs and HCI packets; no user paths, app commands, pairing files, or input output run in the broker. Only one client can claim USB at a time. Disconnect closes the USB transport. Reinstall after updates; installation and removal require administrator approval.
 
-The GUI renews a heartbeat on a dedicated dispatch queue, independently of UI polling. An activity token prevents App Nap throttling during an adapter session while allowing normal system sleep. The worker stops after a lease expires if the GUI crashes or disappears; normal shutdown disconnects peers, attempts a controller reset, and releases the USB transport. Session events record heartbeat expiry, an explicit Stop command, or a shutdown signal. This cleanup is best effort: USB resets and deep sleep can still require manual recovery.
+The GUI renews a heartbeat on a dedicated dispatch queue, independently of UI polling. An activity token prevents App Nap throttling during an adapter session while allowing normal system sleep. The worker stops after a lease expires if the GUI crashes, disappears, or loses the loopback connection; normal shutdown disconnects peers, attempts a controller reset, and releases the USB transport. This cleanup is best effort: USB resets and deep sleep can still require manual recovery.
 
 ## Input decoding
 
-Mouse parsing honors report IDs, signed/bit-packed values, relative movement, buttons, and wheels. Absolute axes are excluded from pointer forwarding. Keyboard parsing covers standard key arrays, NKRO bitmaps, modifiers, and common consumer/media usages. The native output implementation handles keyboard repeat.
+Mouse parsing honors report IDs, signed/bit-packed values, relative movement, buttons, and wheels. Absolute axes are excluded from pointer forwarding. Keyboard parsing covers standard key arrays, NKRO bitmaps, modifiers, and common consumer/media usages. CoreGraphics posts relative mouse, button, scroll, keyboard, and supported consumer-control events in the desktop session.
 
-Both pointer output paths clamp movement and click positions to the nearest active display in CoreGraphics coordinates. They use individual display rectangles to handle negative origins and gaps between monitors. Movement beyond a display edge is discarded; posted movement deltas reflect the distance actually traveled. The GUI also clears fractional movement on clipped axes so reversing direction responds without accumulated off-screen motion.
+The GUI and separate CLI helper use CoreGraphics output. The GUI retains display-bound clamping, click counting, and keyboard repeat handling before posting desktop events.
 
 The CLI uses `pointer_bridge.py` and `pointer.py` instead of the native GUI output path. The Bluetooth process can run as root while the pointer helper stays in the desktop user's session.
 
-Input socket delivery retries temporary macOS datagram buffer exhaustion in order, without marking the output helper permanently disconnected. Connection cleanup still disconnects the Bluetooth peer if releasing input state fails.
+Input socket delivery keeps button and keyboard transitions ordered. It coalesces movement and scrolling, replaces queued motion only when no control transition separates it, and discards motion delayed more than 50 ms at the CoreGraphics receiver. A busy application therefore cannot make the cursor replay a long backlog; controls remain lossless. Optional diagnostics expose motion age, stale-motion drops, and socket read batches without recording pointer coordinates. Connection cleanup still disconnects the Bluetooth peer if releasing input state fails.
 
 ## Audio path
 
@@ -43,8 +43,7 @@ Input socket delivery retries temporary macOS datagram buffer exhaustion in orde
 | Path | Responsibility |
 | --- | --- |
 | `gui/RawBluetooth.swift` | Desktop UI and session control |
-| `gui/PointerServer.swift` | Native input report server and mouse output |
-| `gui/KeyboardOutput.swift` | Native keyboard output |
+| `gui/VirtualHIDServer.swift` | Entitlement-gated composite virtual mouse, keyboard, and consumer HID output |
 | `gui/build.command`, `gui/sign_app.py` | Build, install, and locally sign the desktop app |
 | `gui_backend.py` | Unprivileged Bumble protocol bridge and async session commands |
 | `m196_driver.py` | Host configuration, BLE pairing, HID subscriptions, mouse CLI |
@@ -68,7 +67,7 @@ Input socket delivery retries temporary macOS datagram buffer exhaustion in orde
 | `driver-bonds.pre-dual-adapter.json` | Bond migration backup; keep private |
 | `saved-devices.json` | Saved device information and reconnection preferences |
 | `.signing/` | Dedicated local signing keychain, certificate, and password |
-| `*.log`, `*.hex`, `*.sock`, `pointer.ready`, `driver.stop` | Runtime diagnostics, reports, IPC, and stop/readiness markers |
+| `*.hex`, `*.sock`, `pointer.ready`, `driver.stop` | Optional diagnostics and CLI IPC/stop markers |
 
 Identity, bonds, and preferences are created with owner-only permissions. The normal-user worker owns state after USB service installation; legacy per-session administrator mode can leave root-owned files. The installer migrates known state ownership, and diagnostic dumps use nonfatal atomic replacement. Bond keys are not included in GUI status events. The CLI scanner and mouse diagnostics can expose addresses and reports, so review logs before attaching them to an issue.
 

@@ -4,7 +4,7 @@ Current version: **0.7.0** (build 10).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
-Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and translates HID reports into native macOS input events. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
+Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and posts decoded reports through the logged-in user’s CoreGraphics input session. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
 
 **Mouse and keyboard support is working on the development setup. System audio routing to Bluetooth A2DP/SBC devices is experimental.** The app captures macOS system audio and streams it to a discovered Bluetooth audio sink. Microphone input is not implemented.
 
@@ -12,7 +12,7 @@ Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for 
 
 Download the Intel `.dmg` from [the v0.7.0 release](https://github.com/saikrishna488/raw-bluetooth/releases/tag/v0.7.0), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
 
-This preview is ad-hoc signed and **not notarized**. If macOS blocks opening, use **System Settings → Privacy & Security → Open Anyway** after attempting to launch it. Grant **Accessibility** permission and install USB access once in Settings. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
+Mouse and keyboard input requires Accessibility permission for Raw Bluetooth. Local development builds can send input after that permission is granted; no Apple virtual-HID entitlement is required. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
 
 The installed app keeps pairing keys and preferences in `~/Library/Application Support/Raw Bluetooth`. Development-checkout pairings are not automatically migrated. See [installation and limitations](packaging/INSTALL.txt). Source setup remains available below.
 
@@ -26,7 +26,7 @@ python3 -m venv .venv
 .venv/bin/python packaging/build_release.py
 ```
 
-The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace your installed development app or use its local signing key. Build installers locally and upload the DMG and SHA-256 checksum to GitHub Releases manually; each published installer requires a new version. Developer ID signing and notarization are not automated in this preview.
+Set `RAW_BT_BUNDLE_IDENTIFIER`, `RAW_BT_SIGN_IDENTITY`, and `RAW_BT_NOTARY_PROFILE` for the Apple team before building. The verified, notarized DMG and SHA-256 checksum appear in `dist/`. This does not replace your installed development app or use its local signing key.
 
 ## GUI preview
 
@@ -42,7 +42,7 @@ The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace y
 | Relative mouse movement, buttons, vertical/horizontal scrolling | Implemented; Logitech M196 verified on the development setup |
 | BLE keyboards, modifiers, repeat, NKRO and common media usages | Implemented; Logitech K250 pairing workflow documented |
 | Mouse and keyboard connected together | Implemented |
-| Automatic recovery from temporary input socket congestion | Shared by all supported BLE mice and keyboards; regression tested |
+| Launch-time input latency bound | Motion delayed more than 50 ms is discarded to prevent catch-up jumps; buttons and keys remain ordered |
 | Saved devices and automatic reconnection | Implemented; requires an active app session and device advertising |
 | Mouse and scroll speed controls | Implemented |
 | Bluetooth Classic audio discovery | Implemented |
@@ -53,7 +53,7 @@ The verified DMG and SHA-256 checksum appear in `dist/`. This does not replace y
 
 Other BLE HID devices may work, but this is not a general compatibility guarantee. Bluetooth Classic HID and proprietary receiver protocols are outside the implemented BLE HID path.
 
-Mouse and keyboard reports are decoded from each device's HID descriptor rather than a brand-specific packet layout. Input forwarding and temporary socket congestion recovery use the same code for every device. Recovery retries packets in order, including key-up and button-up events. This does not establish compatibility with every Bluetooth mouse or keyboard; new models still need discovery, pairing, input, and reconnection checks on real hardware.
+Mouse and keyboard reports are decoded from each device's HID descriptor rather than a brand-specific packet layout. Input forwarding and temporary socket congestion recovery use the same code for every device. Movement is coalesced and bounded by age so a delayed receiver does not replay stale cursor travel; button and key transitions remain ordered, including releases. Enable **Show input latency diagnostics** in Settings to inspect recent delay and stale-motion drops without recording pointer coordinates. This does not establish compatibility with every Bluetooth mouse or keyboard; new models still need discovery, pairing, input, and reconnection checks on real hardware.
 
 ## Requirements
 
@@ -61,7 +61,7 @@ Mouse and keyboard reports are decoded from each device's HID descriptor rather 
 - Xcode Command Line Tools (`swiftc`, installed with `xcode-select --install`).
 - Python 3.9 or later. The pinned environment was developed with Python 3.9; other versions need validation.
 - An external USB Bluetooth adapter exposing a standard Bluetooth HCI interface and event/ACL endpoints. CSR **`0a12:0001`** is hardware-tested; other controller models still need validation.
-- Administrator authentication to claim the USB adapter and Accessibility permission for input output.
+- Administrator authentication to claim the USB adapter and Accessibility permission for the desktop app.
 
 The build script currently targets **`x86_64-apple-macosx13.0`**. Native Apple Silicon builds are not configured or validated. Sharing a USB ID does not guarantee identical dongle firmware or behavior.
 
@@ -85,11 +85,10 @@ open "$HOME/Applications/Raw Bluetooth.app"
 The build installs the app in `~/Applications` and creates a private local development signing identity in `.signing/`. It embeds the checkout path: keep this source directory and its `.venv` in place, and rebuild after moving it. This is a locally signed development build, not a standalone notarized installer.
 
 1. Plug in the dongle and open **Raw Bluetooth**.
-2. In **System Settings → Privacy & Security → Accessibility**, grant **Raw Bluetooth** permission.
-3. In **Settings → Authorization**, click **Install USB access…** and approve the one-time administrator request. Then click **Scan devices**.
-4. Put the mouse or keyboard into Bluetooth pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
-5. For keyboard passkey pairing, type the displayed six-digit code on the keyboard being paired and press Enter.
-6. Keep the app running. Use **Release adapter** when finished.
+2. In **Settings → Authorization**, click **Install USB access…** and approve the one-time administrator request. Then click **Scan devices**.
+3. Put the mouse or keyboard into Bluetooth pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
+4. For keyboard passkey pairing, type the displayed six-digit code on the keyboard being paired and press Enter.
+5. Keep the app running. Use **Release adapter** when finished.
 
 For an M196, hold its bottom pairing button for about three seconds until blinking. For a K250, hold its Bluetooth button until blinking. Pairing may take up to two minutes.
 
@@ -145,7 +144,7 @@ Build the native backend and HID decoder using the Python interpreter that runs 
 .venv/bin/python native/benchmark.py
 ```
 
-The C++ backend handles USB access, adapter discovery, classification, reconnect policy, private state, event logging, and input delivery. Python remains for Bumble protocol operations and asynchronous session management. The Swift GUI is unchanged. See [how the native bridge works](docs/NATIVE_BRIDGE.md) for the boundaries and build details.
+The C++ backend handles USB access, adapter discovery, classification, reconnect policy, private state, and input delivery. Python remains for Bumble protocol operations and asynchronous session management. Live GUI commands, status, and heartbeats stay in memory rather than being written to session files. See [how the native bridge works](docs/NATIVE_BRIDGE.md) for the boundaries and build details.
 
 To compile an installable Intel macOS app and DMG:
 

@@ -28,6 +28,15 @@ def main():
     if sys.platform != 'darwin' or platform.machine() != 'x86_64':
         raise SystemExit('Build on an Intel Mac with Xcode Command Line Tools installed.')
     info = plistlib.loads((ROOT / 'gui/Info.plist').read_bytes())
+    bundle_id = os.environ.get('RAW_BT_BUNDLE_IDENTIFIER')
+    identity = os.environ.get('RAW_BT_SIGN_IDENTITY')
+    notary_profile = os.environ.get('RAW_BT_NOTARY_PROFILE')
+    if not bundle_id or not identity or not notary_profile:
+        raise SystemExit('Set RAW_BT_BUNDLE_IDENTIFIER, RAW_BT_SIGN_IDENTITY, and RAW_BT_NOTARY_PROFILE for an entitled release.')
+    entitlements = ROOT / 'gui/RawBluetooth.entitlements'
+    if not entitlements.is_file():
+        raise SystemExit('Virtual-HID entitlements file is missing.')
+    info['CFBundleIdentifier'] = bundle_id
     version = info['CFBundleShortVersionString']
     BUILD.mkdir(parents=True, exist_ok=True)
     DIST.mkdir(exist_ok=True)
@@ -96,16 +105,16 @@ def main():
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', resources / 'INSTALL.txt')
     shutil.copy2(ROOT / 'packaging/usb-service-install.sh', resources / 'usb-service-install.sh')
     run('xcrun', 'swiftc', '-O', '-parse-as-library', 'gui/RawBluetooth.swift',
-        'gui/PointerServer.swift', 'gui/KeyboardOutput.swift', 'gui/SystemAudioCapture.swift', '-o', macos / 'RawBluetooth',
-        '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
+        'gui/VirtualHIDServer.swift', 'gui/SystemAudioCapture.swift', 'gui/SessionChannel.swift', '-o', macos / 'RawBluetooth',
+        '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'IOKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
         '-target', 'x86_64-apple-macosx13.0')
-    identity = os.environ.get('RAW_BT_SIGN_IDENTITY', '-')
-    # Deep ad-hoc signing is for the unsigned preview. Developer ID distribution
-    # needs nested signing and notarization before it is advertised as trusted.
-    if identity != '-':
-        raise SystemExit('Developer ID signing is not automated yet; use the unsigned preview build.')
-    run('codesign', '--force', '--deep', '--sign', '-', app)
+    # Sign nested code first; only the desktop app carries the virtual-HID entitlement.
+    run('codesign', '--force', '--deep', '--options', 'runtime', '--timestamp', '--sign', identity, helpers / 'backend.app')
+    run('codesign', '--force', '--options', 'runtime', '--timestamp', '--entitlements', entitlements, '--sign', identity, app)
     run('codesign', '--verify', '--deep', '--strict', app)
+    entitlements_output = subprocess.check_output(['codesign', '-d', '--entitlements', ':-', str(app)], stderr=subprocess.STDOUT)
+    if b'com.apple.developer.hid.virtual.device' not in entitlements_output:
+        raise RuntimeError('Virtual-HID entitlement was not embedded in the desktop app.')
     run(helpers / 'backend.app/Contents/MacOS/raw-bluetooth-backend', '--self-test')
     (app.parent / 'Applications').symlink_to('/Applications')
     dmg = DIST / f'Raw-Bluetooth-{version}-macOS-Intel.dmg'
@@ -114,6 +123,9 @@ def main():
     run('hdiutil', 'create', '-volname', f'Raw Bluetooth {version}', '-srcfolder', app.parent,
         '-format', 'UDZO', dmg)
     run('hdiutil', 'verify', dmg)
+    run('xcrun', 'notarytool', 'submit', dmg, '--keychain-profile', notary_profile, '--wait')
+    run('xcrun', 'stapler', 'staple', dmg)
+    run('xcrun', 'stapler', 'validate', dmg)
     checksum = hashlib.sha256(dmg.read_bytes()).hexdigest()
     (DIST / (dmg.name + '.sha256')).write_text(f'{checksum}  {dmg.name}\n')
     print(f'Built {dmg}')

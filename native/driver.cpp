@@ -212,11 +212,11 @@ PyObject* sender_create(PyObject*, PyObject* args) {
     try { return PyCapsule_New(new DatagramSender(path), sender_name, sender_destroy); } catch (...) { return error(); }
 }
 PyObject* sender_enqueue(PyObject*, PyObject* args) {
-    PyObject* capsule; const char* payload; Py_ssize_t length;
-    if (!PyArg_ParseTuple(args, "Os#", &capsule, &payload, &length)) return nullptr;
+    PyObject* capsule; const char* payload; Py_ssize_t length; int coalescible = 0;
+    if (!PyArg_ParseTuple(args, "Os#|p", &capsule, &payload, &length, &coalescible)) return nullptr;
     auto sender = static_cast<DatagramSender*>(PyCapsule_GetPointer(capsule, sender_name));
     if (!sender) return nullptr;
-    try { sender->enqueue(std::string(payload, size_t(length))); Py_RETURN_NONE; } catch (...) { return error(); }
+    try { sender->enqueue(std::string(payload, size_t(length)), coalescible); Py_RETURN_NONE; } catch (...) { return error(); }
 }
 PyObject* sender_drain(PyObject*, PyObject* args) {
     PyObject* capsule; double seconds = 1;

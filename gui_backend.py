@@ -24,7 +24,8 @@ from runtime_paths import data_directory
 from adapters import select_transport, migrate_bonds, forget_bond
 from bumble.keys import JsonKeyStore
 from audio_stream import A2DPTestTone, validate_audio_file
-from native_backend import call, EventJournal
+from native_backend import call
+from session_channel import NullSessionChannel, SessionChannel
 
 
 def advertisement_info(adv, previous=None):
@@ -52,21 +53,62 @@ class DisplayPasskey(PairingDelegate):
 class DeviceOutput:
     def __init__(self, path, address):
         self.output, self.address = SocketPointer(path), address
+        self.motion = {}
+        self.motion_timer = None
+        self.motion_timestamp_ns = None
+        self.buttons = [False] * 8
 
     def apply(self, report):
-        self.output.apply(dict(report, device=self.address))
+        if report.get('kind') == 'keyboard':
+            self.flush_motion()
+            self.output.apply(dict(report, device=self.address))
+            return
+        changed = False
+        for index in range(8):
+            key = f'button{index + 1}'
+            if key in report:
+                down = bool(report[key])
+                changed |= down != self.buttons[index]
+                self.buttons[index] = down
+        if changed:
+            self.flush_motion()
+            self.output.apply(dict(report, device=self.address))
+            return
+        axes = {key: value for key, value in report.items() if key in ('x', 'y', 'wheel', 'pan') and value}
+        if not axes:
+            return
+        for key, value in axes.items():
+            self.motion[key] = self.motion.get(key, 0) + value
+        # The CoreGraphics receiver runs in another process; time.time_ns()
+        # shares a clock with Foundation's Date there.
+        self.motion_timestamp_ns = time.time_ns()
+        if self.motion_timer is None:
+            self.motion_timer = asyncio.get_running_loop().call_later(1 / 120, self.flush_motion)
+
+    def flush_motion(self):
+        if self.motion_timer:
+            self.motion_timer.cancel()
+            self.motion_timer = None
+        if self.motion:
+            self.output.apply(dict(self.motion, device=self.address), coalescible=True,
+                              motion_timestamp_ns=self.motion_timestamp_ns)
+            self.motion = {}
+            self.motion_timestamp_ns = None
 
     def release(self):
+        self.flush_motion()
+        self.buttons = [False] * 8
         self.output.apply({'kind': 'release', 'device': self.address})
 
     async def close(self):
+        self.flush_motion()
         await self.output.close()
 
 
 class Backend:
-    def __init__(self, folder, transport, saved_path=None):
+    def __init__(self, folder, transport, saved_path=None, session=None):
         self.folder, self.transport_name = folder, transport
-        self.events = EventJournal(folder / 'events.jsonl')
+        self.events = session or NullSessionChannel()
         self.device = None
         self.devices, self.addresses, self.last_emitted = {}, {}, {}
         self.scanning = False
@@ -335,7 +377,6 @@ class Backend:
 
     async def run(self):
         # The command-line driver may be running; request its normal cleanup first.
-        (data_directory() / 'driver.stop').touch()
         self.emit('starting', message='Taking control of the USB Bluetooth adapter…')
         self.transport_name, native_audio = await asyncio.to_thread(select_transport, self.transport_name)
         self.emit('adapter', transport=self.transport_name, native_audio=native_audio)
@@ -365,23 +406,14 @@ class Backend:
                     self.addresses[key] = hci.Address(key)
                     self.emit('device', **self.devices[key])
                 await self.scan()
-                last_id = None
-                last_heartbeat = time.monotonic()
                 while not self.stopping:
-                    # A closed/crashed GUI stops renewing this lease. Release USB.
-                    heartbeat = self.folder / 'heartbeat'
-                    try:
-                        if heartbeat.stat().st_mtime > time.time() - 10:
-                            last_heartbeat = time.monotonic()
-                    except FileNotFoundError:
-                        pass
-                    if time.monotonic() - last_heartbeat > 15:
+                    # A closed/crashed GUI stops renewing its in-memory lease.
+                    if self.events.heartbeat_expired():
                         self.emit('session_ending', reason='heartbeat_expired',
                                   message='Adapter released because the app heartbeat expired')
                         break
-                    command = read_command(self.folder / 'command.json', last_id)
+                    command = self.events.next_command()
                     if command:
-                        last_id = command['id']
                         try:
                             action = command['action']
                             if action == 'stop':
@@ -434,7 +466,9 @@ class Backend:
 
 async def main(args):
     os.umask(0o077)
-    backend = Backend(args.session, args.transport)
+    session = SessionChannel(args.session_host, args.session_port, args.session_token)
+    await session.connect()
+    backend = Backend(args.session, args.transport, session=session)
     task = asyncio.create_task(backend.run())
     for sig in (signal.SIGTERM, signal.SIGINT):
         asyncio.get_running_loop().add_signal_handler(sig, task.cancel)
@@ -446,12 +480,15 @@ async def main(args):
         backend.emit('error', message=str(exc))
         raise
     finally:
-        backend.events.close()
+        await session.close()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--session', type=Path, required=True)
+    parser.add_argument('--session-host', default='127.0.0.1')
+    parser.add_argument('--session-port', type=int, required=True)
+    parser.add_argument('--session-token', required=True)
     parser.add_argument('--transport', default='auto')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
