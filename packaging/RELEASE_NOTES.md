@@ -1,7 +1,8 @@
 ## What’s new in v0.7.0
 
 - Moves USB brokering, IOKit/libusb adapter discovery, device classification, reconnect policy, private state persistence, CLI pointer output, and ordered input delivery to C++17.
-- Desktop mouse, keyboard, and supported media reports now use an Apple-entitled composite virtual HID device instead of CoreGraphics injection.
+- Desktop mouse, keyboard, and supported media reports use CoreGraphics injection in the logged-in desktop session. Accessibility permission is required; no virtual-HID entitlement is needed.
+- Adds the dark emerald Bluetooth-input app icon to development and release bundles.
 - Keeps the Swift GUI and Bumble Bluetooth protocol behavior. A Python async bridge and runtime are bundled in the app; no Python installation is required.
 - Launchd runs the C++ USB broker directly after a one-time service update. No administrator prompt is needed for normal sessions.
 - Preserves existing pairing files and saved-device formats. Optional diagnostic failures cannot disconnect HID devices.
@@ -13,7 +14,7 @@ Download the Intel macOS DMG, open it, and drag Raw Bluetooth to Applications. P
 
 Requires Intel macOS 13+, a logged-in desktop session, and an external USB Bluetooth controller exposing a standard HCI interface. CSR `0a12:0001` remains the only hardware-verified adapter. Other vendors are detected by interface, but pairing, HID, and audio still require real-hardware validation. Vendor firmware loading and nonstandard interfaces are not supported; a detected controller may still fail initialization. Audio requires a BR/EDR-capable controller and compatible A2DP sink.
 
-**Entitled release required:** input output requires Developer ID signing, notarization, and Apple’s `com.apple.developer.hid.virtual.device` entitlement. Install/update USB access once in Settings. Normal sessions need no administrator prompt. Experimental system audio routing also requires Screen & System Audio Recording permission. Classic Bluetooth HID, login-screen input, and microphones remain unsupported. Development-checkout pairings are not migrated automatically.
+**Accessibility required:** approve Raw Bluetooth in System Settings → Privacy & Security → Accessibility before connecting input. Install/update USB access once in Settings. Normal sessions need no administrator prompt. Experimental system audio routing also requires Screen & System Audio Recording permission. Classic Bluetooth HID, login-screen input, and microphones remain unsupported. Development-checkout pairings are not migrated automatically.
 
 ## Validation
 

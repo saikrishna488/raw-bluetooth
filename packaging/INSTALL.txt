@@ -2,10 +2,9 @@ Raw Bluetooth 0.7.0 — experimental Intel macOS app
 
 1. Drag Raw Bluetooth.app to Applications. Eject this disk image.
 2. Open the app from Applications.
-3. This build must be Apple Developer ID signed, notarized, and carry the
-   approved `com.apple.developer.hid.virtual.device` entitlement. Unsigned or
-   local development builds can scan and pair but cannot provide mouse or
-   keyboard input.
+3. Allow Raw Bluetooth in System Settings > Privacy & Security > Accessibility
+   when prompted. This permission lets the app post mouse and keyboard events
+   through the logged-in desktop session; local development builds are supported.
 4. Open Settings > Authorization > Install USB access and approve the one-time
    administrator request. Later sessions need no administrator authorization.
    Click Scan and put your BLE mouse or keyboard into pairing mode.

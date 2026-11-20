@@ -5,6 +5,7 @@ app="$HOME/Applications/Raw Bluetooth.app"
 mkdir -p "$app/Contents/MacOS"
 mkdir -p "$app/Contents/Resources"
 cp packaging/usb-service-install.sh "$app/Contents/Resources/usb-service-install.sh"
+cp gui/RawBluetooth.icns "$app/Contents/Resources/RawBluetooth.icns"
 cp gui/Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :DriverSourceDirectory $PWD" "$app/Contents/Info.plist"
 if [[ -n "${RAW_BT_BUNDLE_IDENTIFIER:-}" ]]; then

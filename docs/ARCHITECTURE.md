@@ -43,7 +43,9 @@ Input socket delivery keeps button and keyboard transitions ordered. It coalesce
 | Path | Responsibility |
 | --- | --- |
 | `gui/RawBluetooth.swift` | Desktop UI and session control |
-| `gui/VirtualHIDServer.swift` | Entitlement-gated composite virtual mouse, keyboard, and consumer HID output |
+| `gui/PointerServer.swift`, `gui/KeyboardOutput.swift` | Accessibility-authorized CoreGraphics mouse, keyboard, and consumer input output |
+| `gui/VirtualHIDServer.swift` | Retained virtual-HID prototype; not selected by the current desktop app |
+| `gui/RawBluetooth.icns` | Bundled dark emerald Bluetooth-input application icon |
 | `gui/build.command`, `gui/sign_app.py` | Build, install, and locally sign the desktop app |
 | `gui_backend.py` | Unprivileged Bumble protocol bridge and async session commands |
 | `m196_driver.py` | Host configuration, BLE pairing, HID subscriptions, mouse CLI |

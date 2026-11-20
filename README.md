@@ -6,6 +6,8 @@ Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to
 
 Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and posts decoded reports through the logged-in user’s CoreGraphics input session. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
 
+The app bundle includes a dark emerald Bluetooth-input icon; Finder may need a relaunch after replacing an older development build before it refreshes the icon cache.
+
 **Mouse and keyboard support is working on the development setup. System audio routing to Bluetooth A2DP/SBC devices is experimental.** The app captures macOS system audio and streams it to a discovered Bluetooth audio sink. Microphone input is not implemented.
 
 ## Install the compiled app
@@ -86,7 +88,7 @@ The build installs the app in `~/Applications` and creates a private local devel
 
 1. Plug in the dongle and open **Raw Bluetooth**.
 2. In **Settings → Authorization**, click **Install USB access…** and approve the one-time administrator request. Then click **Scan devices**.
-3. Put the mouse or keyboard into Bluetooth pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
+3. Allow **Raw Bluetooth** in **System Settings → Privacy & Security → Accessibility** when prompted, then put the mouse or keyboard into pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
 4. For keyboard passkey pairing, type the displayed six-digit code on the keyboard being paired and press Enter.
 5. Keep the app running. Use **Release adapter** when finished.
 

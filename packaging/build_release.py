@@ -32,10 +32,7 @@ def main():
     identity = os.environ.get('RAW_BT_SIGN_IDENTITY')
     notary_profile = os.environ.get('RAW_BT_NOTARY_PROFILE')
     if not bundle_id or not identity or not notary_profile:
-        raise SystemExit('Set RAW_BT_BUNDLE_IDENTIFIER, RAW_BT_SIGN_IDENTITY, and RAW_BT_NOTARY_PROFILE for an entitled release.')
-    entitlements = ROOT / 'gui/RawBluetooth.entitlements'
-    if not entitlements.is_file():
-        raise SystemExit('Virtual-HID entitlements file is missing.')
+        raise SystemExit('Set RAW_BT_BUNDLE_IDENTIFIER, RAW_BT_SIGN_IDENTITY, and RAW_BT_NOTARY_PROFILE for a notarized release.')
     info['CFBundleIdentifier'] = bundle_id
     version = info['CFBundleShortVersionString']
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -49,6 +46,7 @@ def main():
     resources = app / 'Contents/Resources'
     macos.mkdir(parents=True)
     resources.mkdir()
+    shutil.copy2(ROOT / 'gui/RawBluetooth.icns', resources / 'RawBluetooth.icns')
     info.pop('DriverSourceDirectory', None)
     (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     run(sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--windowed',
@@ -104,17 +102,14 @@ def main():
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', app.parent / 'READ ME FIRST.txt')
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', resources / 'INSTALL.txt')
     shutil.copy2(ROOT / 'packaging/usb-service-install.sh', resources / 'usb-service-install.sh')
-    run('xcrun', 'swiftc', '-O', '-parse-as-library', 'gui/RawBluetooth.swift',
+    run('xcrun', 'swiftc', '-O', '-parse-as-library', 'gui/RawBluetooth.swift', 'gui/PointerServer.swift', 'gui/KeyboardOutput.swift',
         'gui/VirtualHIDServer.swift', 'gui/SystemAudioCapture.swift', 'gui/SessionChannel.swift', '-o', macos / 'RawBluetooth',
         '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'IOKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
         '-target', 'x86_64-apple-macosx13.0')
-    # Sign nested code first; only the desktop app carries the virtual-HID entitlement.
+    # Sign nested code first, then the containing desktop app.
     run('codesign', '--force', '--deep', '--options', 'runtime', '--timestamp', '--sign', identity, helpers / 'backend.app')
-    run('codesign', '--force', '--options', 'runtime', '--timestamp', '--entitlements', entitlements, '--sign', identity, app)
+    run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, app)
     run('codesign', '--verify', '--deep', '--strict', app)
-    entitlements_output = subprocess.check_output(['codesign', '-d', '--entitlements', ':-', str(app)], stderr=subprocess.STDOUT)
-    if b'com.apple.developer.hid.virtual.device' not in entitlements_output:
-        raise RuntimeError('Virtual-HID entitlement was not embedded in the desktop app.')
     run(helpers / 'backend.app/Contents/MacOS/raw-bluetooth-backend', '--self-test')
     (app.parent / 'Applications').symlink_to('/Applications')
     dmg = DIST / f'Raw-Bluetooth-{version}-macOS-Intel.dmg'
