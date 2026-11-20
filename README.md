@@ -50,7 +50,7 @@ Preview users must Control-click the app and choose **Open** on first launch to 
 
 ![Raw Bluetooth desktop GUI showing the device library, discovery area, and device details panel](gui/window-preview.png)
 
-*Earlier development screenshot of the discovery screen. The current app also includes keyboard, saved-device, speed, and experimental audio controls described below.*
+*Current interface preview of the Discovery view. It shows the device library, filters, search, details panel, and navigation for saved devices, input controls, adapter management, activity, and settings.*
 
 ## Current support
 
