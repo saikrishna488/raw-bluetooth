@@ -1,12 +1,20 @@
 # Raw Bluetooth for macOS
 
+### The Raw Bluetooth app
+
+**A distinctive dark-emerald Bluetooth input icon** identifies Raw Bluetooth in Finder, the Dock, and Applications. [View the original macOS app icon (`.icns`)](gui/RawBluetooth.icns).
+
+![Raw Bluetooth app interface](gui/window-preview.png)
+
+> **No Accessibility permission for mouse or keyboard input. No administrator prompt for normal driver sessions after the one-time USB access setup.** Input is delivered through the logged-in user's **CoreGraphics** session, without a kernel extension or Apple virtual-HID entitlement.
+
 Current version: **0.7.0** (build 10).
 
 Use an external USB Bluetooth dongle to connect a wireless mouse and keyboard to macOS through a userspace Bluetooth stack.
 
 Raw Bluetooth talks directly to the dongle over USB HCI, uses Google Bumble for Bluetooth discovery and pairing, and posts decoded reports through the logged-in user’s CoreGraphics input session. Pair devices inside the app, independently of System Settings. This is an experimental userspace driver; it does not install a kernel extension.
 
-The app bundle includes a dark emerald Bluetooth-input icon; Finder may need a relaunch after replacing an older development build before it refreshes the icon cache.
+The app bundle includes the dark-emerald icon linked above. Finder may need a relaunch after replacing an older development build before it refreshes the icon cache.
 
 **Mouse and keyboard support is working on the development setup. System audio routing to Bluetooth A2DP/SBC devices is experimental.** The app captures macOS system audio and streams it to a discovered Bluetooth audio sink. Microphone input is not implemented.
 
@@ -14,7 +22,7 @@ The app bundle includes a dark emerald Bluetooth-input icon; Finder may need a r
 
 Download the Intel `.dmg` from [the v0.7.0 release](https://github.com/saikrishna488/raw-bluetooth/releases/tag/v0.7.0), open it, and drag **Raw Bluetooth** to **Applications**. The community preview bundles Python, USB libraries and FFmpeg; no Terminal setup or source checkout is needed.
 
-Mouse and keyboard input requires Accessibility permission for Raw Bluetooth. Local development builds can send input after that permission is granted; no Apple virtual-HID entitlement is required. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
+Mouse and keyboard input uses CoreGraphics in the logged-in desktop session and does **not** require Accessibility permission. Once the USB access service has been installed with one-time administrator approval, normal driver sessions do **not** require administrator authentication. No Apple virtual-HID entitlement is required. Requires Intel macOS 13+ and a supported external adapter; hardware compatibility still needs independent testing.
 
 The installed app keeps pairing keys and preferences in `~/Library/Application Support/Raw Bluetooth`. Development-checkout pairings are not automatically migrated. See [installation and limitations](packaging/INSTALL.txt). Source setup remains available below.
 
@@ -63,7 +71,7 @@ Mouse and keyboard reports are decoded from each device's HID descriptor rather 
 - Xcode Command Line Tools (`swiftc`, installed with `xcode-select --install`).
 - Python 3.9 or later. The pinned environment was developed with Python 3.9; other versions need validation.
 - An external USB Bluetooth adapter exposing a standard Bluetooth HCI interface and event/ACL endpoints. CSR **`0a12:0001`** is hardware-tested; other controller models still need validation.
-- Administrator authentication to claim the USB adapter and Accessibility permission for the desktop app.
+- One-time administrator authentication to install the USB access service. Subsequent normal sessions do not require administrator authentication or Accessibility permission for mouse/keyboard input.
 
 The build script currently targets **`x86_64-apple-macosx13.0`**. Native Apple Silicon builds are not configured or validated. Sharing a USB ID does not guarantee identical dongle firmware or behavior.
 
@@ -87,8 +95,8 @@ open "$HOME/Applications/Raw Bluetooth.app"
 The build installs the app in `~/Applications` and creates a private local development signing identity in `.signing/`. It embeds the checkout path: keep this source directory and its `.venv` in place, and rebuild after moving it. This is a locally signed development build, not a standalone notarized installer.
 
 1. Plug in the dongle and open **Raw Bluetooth**.
-2. In **Settings → Authorization**, click **Install USB access…** and approve the one-time administrator request. Then click **Scan devices**.
-3. Allow **Raw Bluetooth** in **System Settings → Privacy & Security → Accessibility** when prompted, then put the mouse or keyboard into pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
+2. In **Settings → Authorization**, click **Install USB access…** and approve the one-time administrator request (initial setup only). Then click **Scan devices**.
+3. No Accessibility permission is needed. Put the mouse or keyboard into pairing mode, select it, and choose **Connect mouse** or **Connect keyboard**.
 4. For keyboard passkey pairing, type the displayed six-digit code on the keyboard being paired and press Enter.
 5. Keep the app running. Use **Release adapter** when finished.
 
@@ -124,7 +132,7 @@ For a development checkout, build the packaged app with `.venv/bin/python packag
 .venv/bin/pip check
 ```
 
-The suite covers HID parsing, backend behavior, and input forwarding under temporary socket congestion for both mice and keyboards. Passing these tests does not establish hardware compatibility, Accessibility authorization, audio playback, or USB recovery on another Mac.
+The suite covers HID parsing, backend behavior, and input forwarding under temporary socket congestion for both mice and keyboards. Passing these tests does not establish hardware compatibility, CoreGraphics input delivery on another Mac, audio playback, or USB recovery.
 
 ## Local data and privacy
 
