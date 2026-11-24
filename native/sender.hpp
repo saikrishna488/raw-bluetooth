@@ -24,6 +24,7 @@ struct InputReport {
 };
 
 class DatagramSender {
+    static constexpr size_t motion_backlog_threshold = 4;
     struct Packet { std::string bytes; bool motion = false; uint64_t device = 0; int32_t x = 0, y = 0, wheel = 0, pan = 0; };
     FD socket;
     std::mutex mutex;
@@ -58,7 +59,10 @@ class DatagramSender {
     }
     void enqueue_locked(Packet packet) {
         if (stopping || !failure.empty()) throw std::runtime_error("Pointer helper disconnected" + (failure.empty() ? "" : ": " + failure));
-        if (packet.motion && !queue.empty() && queue.back().motion && queue.back().device == packet.device) {
+        // Preserve the peripheral's normal report cadence. Only merge once a
+        // genuine backlog exists, rather than turning one queued packet into
+        // a lower-rate stream during ordinary scheduling jitter.
+        if (packet.motion && queue.size() >= motion_backlog_threshold && queue.back().motion && queue.back().device == packet.device) {
             auto& prior = queue.back(); prior.x += packet.x; prior.y += packet.y; prior.wheel += packet.wheel; prior.pan += packet.pan;
             prior.bytes = mouse(prior.device, prior.x, prior.y, prior.wheel, prior.pan);
         } else {

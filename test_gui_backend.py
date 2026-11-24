@@ -86,7 +86,7 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mouse_motion_and_scroll_are_coalesced(self):
+    async def test_mouse_motion_and_scroll_preserve_normal_report_cadence(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
             path = str(Path(folder) / 'pointer.sock')
             receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -96,16 +96,15 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 output.apply({'x': 2, 'y': -1})
                 output.apply({'x': 3, 'wheel': 2})
-                report = binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
-                timestamp = report.pop('motion_timestamp_ns')
-                self.assertIsInstance(timestamp, int)
-                self.assertGreater(timestamp, 0)
-                self.assertEqual(report, {'x': 5, 'y': -1, 'wheel': 2, 'device': device_token('mouse')})
+                reports = [binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1)) for _ in range(2)]
+                for report in reports: self.assertGreater(report.pop('motion_timestamp_ns'), 0)
+                self.assertEqual(reports, [{'x': 2, 'y': -1, 'device': device_token('mouse')},
+                                          {'x': 3, 'wheel': 2, 'device': device_token('mouse')}])
             finally:
                 await output.close()
                 receiver.close()
 
-    async def test_unchanged_buttons_do_not_prevent_motion_coalescing(self):
+    async def test_unchanged_buttons_do_not_reduce_report_cadence(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
             path = str(Path(folder) / 'pointer.sock')
             receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -115,9 +114,10 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 output.apply({'x': 2, 'button1': False})
                 output.apply({'x': 3, 'wheel': 2, 'button1': False})
-                report = binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
-                self.assertGreater(report.pop('motion_timestamp_ns'), 0)
-                self.assertEqual(report, {'x': 5, 'wheel': 2, 'device': device_token('mouse')})
+                reports = [binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1)) for _ in range(2)]
+                for report in reports: self.assertGreater(report.pop('motion_timestamp_ns'), 0)
+                self.assertEqual(reports, [{'x': 2, 'device': device_token('mouse')},
+                                          {'x': 3, 'wheel': 2, 'device': device_token('mouse')}])
             finally:
                 await output.close()
                 receiver.close()
