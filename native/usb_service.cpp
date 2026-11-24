@@ -2,10 +2,14 @@
 #include "hci.hpp"
 #include <atomic>
 #include <csignal>
+#include <condition_variable>
+#include <deque>
 #include <iostream>
 #include <mutex>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/socket.h>
+#include <sys/qos.h>
 #include <sys/un.h>
 #include <thread>
 
@@ -105,11 +109,12 @@ struct Session {
     std::atomic<bool> ended{false};
     Input events{this, 1024, 4}, acl{this, 65536, 2};
     std::thread event_thread;
-    // libusb may invoke transfer callbacks from the thread performing a
-    // synchronous host transfer as well as from event_thread. Keep an entire
-    // H4 frame together so the packet type cannot be interleaved with another
-    // transfer's payload on the stream socket.
+    std::thread writer_thread;
     std::mutex output_mutex;
+    std::condition_variable output_ready;
+    std::deque<std::vector<uint8_t>> output;
+    size_t output_bytes = 0;
+    static constexpr size_t maximum_output_bytes = 1024 * 1024;
     explicit Session(int fd, const std::string& name) : device(name), socket(fd) {}
     static void received(libusb_transfer* transfer) noexcept {
         auto& input = *static_cast<Input*>(transfer->user_data);
@@ -117,21 +122,46 @@ struct Session {
         input.pending = false;
         if (transfer->status == LIBUSB_TRANSFER_COMPLETED && !self.ended) {
             try {
-                // Only this event thread writes device data; packet framing is
-                // preserved across arbitrary stream read/write boundaries.
-                // A successful USB zero-length packet contains no HCI frame.
-                // Prefixing it would corrupt framing of the following packet.
+                // Never let a temporarily descheduled desktop worker block
+                // libusb's completion thread. Queue complete H4 frames and
+                // resubmit this transfer immediately; the writer handles
+                // socket backpressure on its own interactive-QoS thread.
                 if (transfer->actual_length > 0) {
                     std::lock_guard<std::mutex> lock(self.output_mutex);
-                    send_bytes(self.socket, &input.type, 1);
-                    send_bytes(self.socket, transfer->buffer, size_t(transfer->actual_length));
+                    if (self.output_bytes + size_t(transfer->actual_length) + 1 > maximum_output_bytes) throw std::runtime_error("USB output queue exceeded limit");
+                    auto& packet = self.output.emplace_back();
+                    packet.reserve(size_t(transfer->actual_length) + 1);
+                    packet.push_back(input.type);
+                    packet.insert(packet.end(), transfer->buffer, transfer->buffer + transfer->actual_length);
+                    self.output_bytes += packet.size();
+                    self.output_ready.notify_one();
                 }
                 int result = libusb_submit_transfer(transfer);
                 if (result == 0) { input.pending = true; return; }
             } catch (...) {}
         }
         self.ended = true;
+        self.output_ready.notify_all();
         shutdown(self.socket, SHUT_RDWR);
+    }
+    void write_output() noexcept {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        try {
+            while (!ended) {
+                std::vector<uint8_t> packet;
+                {
+                    std::unique_lock<std::mutex> lock(output_mutex);
+                    output_ready.wait(lock, [this] { return ended || !output.empty(); });
+                    if (ended) break;
+                    packet = std::move(output.front()); output.pop_front(); output_bytes -= packet.size();
+                }
+                send_bytes(socket, packet.data(), packet.size());
+            }
+        } catch (...) {
+            ended = true;
+            output_ready.notify_all();
+            shutdown(socket, SHUT_RDWR);
+        }
     }
     void start() {
         libusb_fill_interrupt_transfer(events.transfer, device.handle, device.ep.events, events.buffer.data(), int(events.buffer.size()), received, &events, 0);
@@ -145,13 +175,16 @@ struct Session {
             throw;
         }
         try {
+            writer_thread = std::thread([this] { write_output(); });
             event_thread = std::thread([this] {
+                pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
                 while (!ended && !stopping) {
                     timeval wait{0, 100000};
                     int result = libusb_handle_events_timeout(device.context.value, &wait);
                     if (result < 0 && result != LIBUSB_ERROR_INTERRUPTED) ended = true;
                 }
                 ended = true;
+                output_ready.notify_all();
                 shutdown(socket, SHUT_RDWR);
                 if (events.pending) libusb_cancel_transfer(events.transfer);
                 if (acl.pending) libusb_cancel_transfer(acl.transfer);
@@ -163,6 +196,7 @@ struct Session {
             });
         } catch (...) {
             ended = true;
+            output_ready.notify_all();
             libusb_cancel_transfer(events.transfer); libusb_cancel_transfer(acl.transfer);
             while (events.pending || acl.pending) { timeval wait{0, 10000}; libusb_handle_events_timeout(device.context.value, &wait); }
             throw;
@@ -198,7 +232,9 @@ struct Session {
     }
     ~Session() {
         ended = true;
+        output_ready.notify_all();
         if (event_thread.joinable()) event_thread.join();
+        if (writer_thread.joinable()) writer_thread.join();
     }
 };
 void serve(uid_t uid, bool test_mode, const std::string& path) {
