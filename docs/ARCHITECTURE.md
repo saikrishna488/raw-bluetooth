@@ -32,7 +32,7 @@ The GUI and separate CLI helper use CoreGraphics output. The GUI retains display
 
 The CLI uses `pointer_bridge.py` and `pointer.py` instead of the native GUI output path. The Bluetooth process can run as root while the pointer helper stays in the desktop user's session.
 
-Input socket delivery keeps button and keyboard transitions ordered. It coalesces movement and scrolling, replaces queued motion only when no control transition separates it, and discards motion delayed more than 50 ms at the CoreGraphics receiver. A busy application therefore cannot make the cursor replay a long backlog; controls remain lossless. Optional diagnostics expose motion age, stale-motion drops, and socket read batches without recording pointer coordinates. Connection cleanup still disconnects the Bluetooth peer if releasing input state fails.
+Input socket delivery uses compact, versioned binary records rather than JSON. The native sender assigns a stable per-device token, coalesces movement and scrolling, preserves button and keyboard transition ordering, and runs at interactive QoS. The CoreGraphics receiver discards motion delayed more than 50 ms, so a busy application cannot make the cursor replay a long backlog; controls remain lossless. Optional diagnostics expose motion age, stale-motion drops, and socket read batches without recording pointer coordinates. Connection cleanup still disconnects the Bluetooth peer if releasing input state fails.
 
 ## Audio path
 

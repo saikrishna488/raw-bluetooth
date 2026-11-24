@@ -5,11 +5,22 @@ import ScreenCaptureKit
 /// Captures the current macOS output mix and writes its PCM frames to a FIFO
 /// consumed by the privileged A2DP worker. macOS asks for system-audio access.
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    var onStopped: ((String) -> Void)?
+    var onDiagnostic: ((String) -> Void)?
     private var stream: SCStream?
     private let fifo: URL
     private let writerQueue = DispatchQueue(label: "local.rawbluetooth.audio-fifo")
     private let openQueue = DispatchQueue(label: "local.rawbluetooth.audio-fifo-open")
     private var outputFd: Int32 = -1
+    private var keepAliveTimer: DispatchSourceTimer?
+    // A2DP sinks commonly suspend an otherwise valid stream after a few
+    // seconds with no RTP packets. ScreenCaptureKit does not always emit
+    // buffers while macOS is silent, so supply 20 ms of silent stereo PCM to
+    // keep the SBC pipeline and sink alive between captured buffers.
+    private let silenceFrame = [Float](repeating: 0, count: 960 * 2)
+    private var lastAudioWriteNs: UInt64 = 0
+    private var loggedSilence = false
+    private var loggedCaptureAudio = false
     private let stateLock = NSLock()
     private var stopped = false
 
@@ -54,7 +65,11 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
         openQueue.async {
             guard !self.isStopped else { return }
             let fd = Darwin.open(self.fifo.path, O_WRONLY)
-            guard fd >= 0 else { self.stop(); return }
+            guard fd >= 0 else {
+                let error = errno
+                self.stop(reason: "FIFO writer open failed: \(String(cString: strerror(error)))")
+                return
+            }
             self.stateLock.lock()
             if self.stopped {
                 self.stateLock.unlock()
@@ -63,10 +78,16 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
             }
             self.outputFd = fd
             self.stateLock.unlock()
+            self.writerQueue.async {
+                guard !self.isStopped else { return }
+                self.lastAudioWriteNs = DispatchTime.now().uptimeNanoseconds
+                self.startKeepAlive()
+                self.diagnose("FIFO writer opened; silence keep-alive armed")
+            }
         }
     }
 
-    func stop() {
+    func stop(reason: String = "stopped by app") {
         stateLock.lock()
         if stopped {
             stateLock.unlock()
@@ -75,6 +96,8 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
         stopped = true
         let fd = outputFd
         outputFd = -1
+        keepAliveTimer?.cancel()
+        keepAliveTimer = nil
         stateLock.unlock()
 
         if fd >= 0 {
@@ -84,12 +107,54 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
         writerQueue.async {
             try? FileManager.default.removeItem(at: self.fifo)
         }
+        DispatchQueue.main.async { [weak self] in self?.onStopped?(reason) }
     }
 
     private var isStopped: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         return stopped
+    }
+
+    // Called only from writerQueue, which also serializes real capture buffers
+    // and the silence writes so their PCM bytes cannot interleave in the FIFO.
+    private func startKeepAlive() {
+        keepAliveTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: writerQueue)
+        timer.schedule(deadline: .now() + .milliseconds(40), repeating: .milliseconds(20), leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in self?.writeSilenceIfNeeded() }
+        keepAliveTimer = timer
+        timer.resume()
+    }
+
+    private func diagnose(_ message: String) {
+        DispatchQueue.main.async { [weak self] in self?.onDiagnostic?(message) }
+    }
+
+    private func writeSilenceIfNeeded() {
+        guard !isStopped else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - lastAudioWriteNs >= 40_000_000 else { return }
+        stateLock.lock()
+        let fd = outputFd
+        stateLock.unlock()
+        guard fd >= 0 else { return }
+        let expected = silenceFrame.count * MemoryLayout<Float>.size
+        let written = silenceFrame.withUnsafeBytes { buffer in
+            Darwin.write(fd, buffer.baseAddress, buffer.count)
+        }
+        if written == expected {
+            lastAudioWriteNs = now
+            if !loggedSilence {
+                loggedSilence = true
+                diagnose("silence keep-alive is writing PCM")
+            }
+        } else if written < 0 {
+            let error = errno
+            if error == EPIPE || error == EBADF {
+                stop(reason: "FIFO writer closed: \(String(cString: strerror(error)))")
+            }
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -165,16 +230,25 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
             }
         }
 
+        let expected = pcm.count * MemoryLayout<Float>.size
         let written = pcm.withUnsafeBytes { buffer in
             Darwin.write(fd, buffer.baseAddress, buffer.count)
         }
-        if written < 0 {
+        if written == expected {
+            lastAudioWriteNs = DispatchTime.now().uptimeNanoseconds
+            if !loggedCaptureAudio {
+                loggedCaptureAudio = true
+                diagnose("received system-audio PCM from ScreenCaptureKit")
+            }
+        } else if written < 0 {
             let err = errno
             if err == EPIPE || err == EBADF {
-                stop()
+                stop(reason: "FIFO writer closed: \(String(cString: strerror(err)))")
             }
         }
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) { stop() }
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        stop(reason: "ScreenCaptureKit stopped: \(error.localizedDescription)")
+    }
 }

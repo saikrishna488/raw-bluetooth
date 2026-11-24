@@ -65,6 +65,7 @@ async def use_mouse(device, address, args, pointer, observer=None):
     notify('connecting', address=str(address))
     connection = await device.connect(address, timeout=20)
     disconnected = asyncio.Event()
+    tuning_task = None
     connection.on('disconnection', lambda *_: disconnected.set())
     try:
         print('CONNECTED. Establishing encrypted BLE pairing.', flush=True)
@@ -141,12 +142,27 @@ async def use_mouse(device, address, args, pointer, observer=None):
             subscriptions += 1
         if not subscriptions:
             raise RuntimeError('No supported HID input reports found')
+
+        async def tune_input_link():
+            # A central may request a 7.5–15 ms, zero-latency interval. The
+            # peripheral/controller is authoritative and can reject it, so this
+            # is deliberately non-fatal and never delays establishing input.
+            try:
+                await asyncio.wait_for(connection.update_parameters(7.5, 15.0, 0, 2000.0), 5)
+                logging.info('Requested low-latency BLE connection parameters')
+            except Exception as exc:
+                logging.debug('BLE low-latency parameter request was not accepted: %s', exc)
+
+        tuning_task = asyncio.create_task(tune_input_link())
         print(f'READY: {subscriptions} {"keyboard" if keyboard else "mouse"} input reports subscribed.', flush=True)
         notify('connected', address=str(address), subscriptions=subscriptions)
         await disconnected.wait()
         print(f'DISCONNECTED after {count} reports', flush=True)
         notify('disconnected', reports=count)
     finally:
+        if tuning_task:
+            tuning_task.cancel()
+            await asyncio.gather(tuning_task, return_exceptions=True)
         if pointer:
             try:
                 pointer.release()

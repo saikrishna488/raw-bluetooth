@@ -6,6 +6,8 @@
 #include "sender.hpp"
 #include "hci.hpp"
 #include <cstdlib>
+#include <pthread.h>
+#include <sys/qos.h>
 
 using namespace rawbt;
 namespace {
@@ -216,7 +218,51 @@ PyObject* sender_enqueue(PyObject*, PyObject* args) {
     if (!PyArg_ParseTuple(args, "Os#|p", &capsule, &payload, &length, &coalescible)) return nullptr;
     auto sender = static_cast<DatagramSender*>(PyCapsule_GetPointer(capsule, sender_name));
     if (!sender) return nullptr;
-    try { sender->enqueue(std::string(payload, size_t(length)), coalescible); Py_RETURN_NONE; } catch (...) { return error(); }
+    PyErr_SetString(PyExc_RuntimeError, "JSON input packets are no longer supported; use sender_enqueue_report");
+    return nullptr;
+}
+long report_number(PyObject* report, const char* key, bool* present = nullptr) {
+    PyObject* value = PyMapping_GetItemString(report, const_cast<char*>(key));
+    if (!value) { PyErr_Clear(); if (present) *present = false; return 0; }
+    if (present) *present = true;
+    auto result = PyLong_AsLong(value); Py_DECREF(value);
+    if (PyErr_Occurred()) throw std::invalid_argument("Invalid input report value");
+    return result;
+}
+void report_usages(PyObject* report, const char* key, std::vector<uint16_t>& output) {
+    PyObject* value = PyMapping_GetItemString(report, const_cast<char*>(key));
+    if (!value) { PyErr_Clear(); return; }
+    PyObject* iterator = PyObject_GetIter(value); Py_DECREF(value);
+    if (!iterator) throw std::invalid_argument("Invalid input usage list");
+    while (PyObject* item = PyIter_Next(iterator)) {
+        auto usage = PyLong_AsLong(item); Py_DECREF(item);
+        if (PyErr_Occurred() || usage < 0 || usage > 0xffff || output.size() == 255) { Py_DECREF(iterator); throw std::invalid_argument("Invalid input usage"); }
+        output.push_back(uint16_t(usage));
+    }
+    Py_DECREF(iterator); if (PyErr_Occurred()) throw std::invalid_argument("Invalid input usage list");
+}
+PyObject* sender_enqueue_report(PyObject*, PyObject* args) {
+    PyObject *capsule, *report; const char* device;
+    if (!PyArg_ParseTuple(args, "OsO", &capsule, &device, &report)) return nullptr;
+    auto sender = static_cast<DatagramSender*>(PyCapsule_GetPointer(capsule, sender_name));
+    if (!sender) return nullptr;
+    try {
+        InputReport input; input.device = device;
+        PyObject* kind = PyMapping_GetItemString(report, const_cast<char*>("kind"));
+        if (!kind) PyErr_Clear();
+        const char* text = kind && PyUnicode_Check(kind) ? PyUnicode_AsUTF8(kind) : nullptr;
+        if (kind && !text) { Py_DECREF(kind); return nullptr; }
+        if (text && std::strcmp(text, "keyboard") == 0) input.kind = InputKind::keyboard;
+        else if (text && std::strcmp(text, "release") == 0) input.kind = InputKind::release;
+        Py_XDECREF(kind);
+        if (input.kind == InputKind::keyboard) { report_usages(report, "keys", input.keys); report_usages(report, "consumer", input.consumers); }
+        else if (input.kind == InputKind::mouse) {
+            input.x = int32_t(report_number(report, "x")); input.y = int32_t(report_number(report, "y"));
+            input.wheel = int32_t(report_number(report, "wheel")); input.pan = int32_t(report_number(report, "pan"));
+            for (int index = 1; index <= 8; ++index) { char key[9]; snprintf(key, sizeof(key), "button%d", index); bool present; auto value = report_number(report, key, &present); if (present) { input.button_mask |= uint8_t(1 << (index - 1)); if (value) input.button_values |= uint8_t(1 << (index - 1)); } }
+        }
+        sender->enqueue_report(input); Py_RETURN_NONE;
+    } catch (...) { return error(); }
 }
 PyObject* sender_drain(PyObject*, PyObject* args) {
     PyObject* capsule; double seconds = 1;
@@ -237,13 +283,20 @@ PyObject* sender_close(PyObject*, PyObject* capsule) {
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
+PyObject* input_qos(PyObject*, PyObject*) {
+    // The Bumble/asyncio callback that builds input datagrams runs on this
+    // thread. Do this once per active input connection, not for scanning.
+    return PyBool_FromLong(pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0);
+}
 PyMethodDef methods[] = {
     {"execute", execute, METH_VARARGS, nullptr},
     {"journal_create", journal_create, METH_VARARGS, nullptr}, {"journal_emit", journal_emit, METH_VARARGS, nullptr}, {"journal_close", journal_close, METH_O, nullptr},
     {"pointer_create", pointer_create, METH_NOARGS, nullptr}, {"pointer_apply", pointer_apply, METH_VARARGS, nullptr}, {"pointer_release", pointer_release, METH_O, nullptr},
     {"pointer_bridge", run_pointer_bridge, METH_VARARGS, nullptr},
     {"sender_create", sender_create, METH_VARARGS, nullptr}, {"sender_enqueue", sender_enqueue, METH_VARARGS, nullptr},
+    {"sender_enqueue_report", sender_enqueue_report, METH_VARARGS, nullptr},
     {"sender_drain", sender_drain, METH_VARARGS, nullptr}, {"sender_close", sender_close, METH_O, nullptr},
+    {"input_qos", input_qos, METH_NOARGS, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef module = {PyModuleDef_HEAD_INIT, "_driver_native", nullptr, -1, methods};

@@ -1,4 +1,4 @@
-## What’s new in v0.7.0
+## What’s new in v0.7.1
 
 - Moves USB brokering, IOKit/libusb adapter discovery, device classification, reconnect policy, private state persistence, CLI pointer output, and ordered input delivery to C++17.
 - Desktop mouse, keyboard, and supported media reports use CoreGraphics injection in the logged-in desktop session. Accessibility permission is required; no virtual-HID entitlement is needed.
@@ -20,4 +20,4 @@ Requires Intel macOS 13+, a logged-in desktop session, and an external USB Bluet
 
 61 contract and integration tests passed. Native packet-framing and policy tests passed under AddressSanitizer and UndefinedBehaviorSanitizer. The installer passed read-only signature, bundled-runtime, USB-library, FFmpeg, and private-data checks without a checkout or Python on PATH. Live mouse input was verified through the native USB broker and C++ backend. The user confirmed sleep/wake reconnection without another administrator prompt on the development setup. Other adapters and macOS versions still require independent hardware testing.
 
-Full changelog: https://github.com/saikrishna488/raw-bluetooth/compare/v0.6.0...v0.7.0
+Full changelog: https://github.com/saikrishna488/raw-bluetooth/compare/v0.7.0...v0.7.1

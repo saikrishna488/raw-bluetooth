@@ -1,6 +1,7 @@
 """Build an Intel DMG without installing or changing the development app."""
 import hashlib
 import importlib.metadata
+import argparse
 import json
 import os
 from pathlib import Path
@@ -24,16 +25,19 @@ def run(*args, **kwargs):
     subprocess.run([str(arg) for arg in args], check=True, cwd=ROOT, **kwargs)
 
 
-def main():
+def main(unsigned=False):
     if sys.platform != 'darwin' or platform.machine() != 'x86_64':
         raise SystemExit('Build on an Intel Mac with Xcode Command Line Tools installed.')
     info = plistlib.loads((ROOT / 'gui/Info.plist').read_bytes())
     bundle_id = os.environ.get('RAW_BT_BUNDLE_IDENTIFIER')
     identity = os.environ.get('RAW_BT_SIGN_IDENTITY')
     notary_profile = os.environ.get('RAW_BT_NOTARY_PROFILE')
-    if not bundle_id or not identity or not notary_profile:
+    if not unsigned and (not bundle_id or not identity or not notary_profile):
         raise SystemExit('Set RAW_BT_BUNDLE_IDENTIFIER, RAW_BT_SIGN_IDENTITY, and RAW_BT_NOTARY_PROFILE for a notarized release.')
-    info['CFBundleIdentifier'] = bundle_id
+    if bundle_id:
+        info['CFBundleIdentifier'] = bundle_id
+    if unsigned:
+        identity = '-'
     version = info['CFBundleShortVersionString']
     BUILD.mkdir(parents=True, exist_ok=True)
     DIST.mkdir(exist_ok=True)
@@ -106,9 +110,13 @@ def main():
         'gui/VirtualHIDServer.swift', 'gui/SystemAudioCapture.swift', 'gui/SessionChannel.swift', '-o', macos / 'RawBluetooth',
         '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'IOKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
         '-target', 'x86_64-apple-macosx13.0')
-    # Sign nested code first, then the containing desktop app.
-    run('codesign', '--force', '--deep', '--options', 'runtime', '--timestamp', '--sign', identity, helpers / 'backend.app')
-    run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity, app)
+    # Sign nested code first, then the containing desktop app. Ad-hoc preview
+    # signatures cannot be timestamped.
+    sign_options = ['codesign', '--force', '--options', 'runtime']
+    if not unsigned:
+        sign_options.append('--timestamp')
+    run(*sign_options, '--deep', '--sign', identity, helpers / 'backend.app')
+    run(*sign_options, '--sign', identity, app)
     run('codesign', '--verify', '--deep', '--strict', app)
     run(helpers / 'backend.app/Contents/MacOS/raw-bluetooth-backend', '--self-test')
     (app.parent / 'Applications').symlink_to('/Applications')
@@ -118,13 +126,16 @@ def main():
     run('hdiutil', 'create', '-volname', f'Raw Bluetooth {version}', '-srcfolder', app.parent,
         '-format', 'UDZO', dmg)
     run('hdiutil', 'verify', dmg)
-    run('xcrun', 'notarytool', 'submit', dmg, '--keychain-profile', notary_profile, '--wait')
-    run('xcrun', 'stapler', 'staple', dmg)
-    run('xcrun', 'stapler', 'validate', dmg)
+    if not unsigned:
+        run('xcrun', 'notarytool', 'submit', dmg, '--keychain-profile', notary_profile, '--wait')
+        run('xcrun', 'stapler', 'staple', dmg)
+        run('xcrun', 'stapler', 'validate', dmg)
     checksum = hashlib.sha256(dmg.read_bytes()).hexdigest()
     (DIST / (dmg.name + '.sha256')).write_text(f'{checksum}  {dmg.name}\n')
-    print(f'Built {dmg}')
+    print(f'Built {dmg}' + (' (unsigned preview)' if unsigned else ''))
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--unsigned', action='store_true', help='Create an ad-hoc-signed preview DMG without notarization')
+    main(parser.parse_args().unsigned)

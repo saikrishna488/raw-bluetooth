@@ -105,6 +105,11 @@ struct Session {
     std::atomic<bool> ended{false};
     Input events{this, 1024, 4}, acl{this, 65536, 2};
     std::thread event_thread;
+    // libusb may invoke transfer callbacks from the thread performing a
+    // synchronous host transfer as well as from event_thread. Keep an entire
+    // H4 frame together so the packet type cannot be interleaved with another
+    // transfer's payload on the stream socket.
+    std::mutex output_mutex;
     explicit Session(int fd, const std::string& name) : device(name), socket(fd) {}
     static void received(libusb_transfer* transfer) noexcept {
         auto& input = *static_cast<Input*>(transfer->user_data);
@@ -117,6 +122,7 @@ struct Session {
                 // A successful USB zero-length packet contains no HCI frame.
                 // Prefixing it would corrupt framing of the following packet.
                 if (transfer->actual_length > 0) {
+                    std::lock_guard<std::mutex> lock(self.output_mutex);
                     send_bytes(self.socket, &input.type, 1);
                     send_bytes(self.socket, transfer->buffer, size_t(transfer->actual_length));
                 }

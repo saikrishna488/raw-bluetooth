@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import signal
@@ -19,6 +20,7 @@ from bumble.device import Device
 from bumble.pairing import PairingConfig, PairingDelegate
 from usb_service import open_driver_transport as open_transport
 from m196_driver import SocketPointer, configuration, use_mouse
+from native_sender import prioritize_input_thread
 from saved_devices import SavedDevices
 from runtime_paths import data_directory
 from adapters import select_transport, migrate_bonds, forget_bond
@@ -26,6 +28,26 @@ from bumble.keys import JsonKeyStore
 from audio_stream import A2DPTestTone, validate_audio_file
 from native_backend import call
 from session_channel import NullSessionChannel, SessionChannel
+
+
+def configure_logging():
+    """Keep protocol failures after the GUI has consumed the worker's stderr."""
+    log_path = data_directory() / 'backend.log'
+    handlers = [logging.StreamHandler()]
+    try:
+        handlers.insert(0, RotatingFileHandler(
+            log_path, maxBytes=512 * 1024, backupCount=2, encoding='utf-8'
+        ))
+    except OSError:
+        # Stderr remains available to the GUI if the diagnostics directory is
+        # temporarily unavailable; Bluetooth operation must not depend on logs.
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+        handlers=handlers,
+        force=True,
+    )
 
 
 def advertisement_info(adv, previous=None):
@@ -53,55 +75,14 @@ class DisplayPasskey(PairingDelegate):
 class DeviceOutput:
     def __init__(self, path, address):
         self.output, self.address = SocketPointer(path), address
-        self.motion = {}
-        self.motion_timer = None
-        self.motion_timestamp_ns = None
-        self.buttons = [False] * 8
 
     def apply(self, report):
-        if report.get('kind') == 'keyboard':
-            self.flush_motion()
-            self.output.apply(dict(report, device=self.address))
-            return
-        changed = False
-        for index in range(8):
-            key = f'button{index + 1}'
-            if key in report:
-                down = bool(report[key])
-                changed |= down != self.buttons[index]
-                self.buttons[index] = down
-        if changed:
-            self.flush_motion()
-            self.output.apply(dict(report, device=self.address))
-            return
-        axes = {key: value for key, value in report.items() if key in ('x', 'y', 'wheel', 'pan') and value}
-        if not axes:
-            return
-        for key, value in axes.items():
-            self.motion[key] = self.motion.get(key, 0) + value
-        # The CoreGraphics receiver runs in another process; time.time_ns()
-        # shares a clock with Foundation's Date there.
-        self.motion_timestamp_ns = time.time_ns()
-        if self.motion_timer is None:
-            self.motion_timer = asyncio.get_running_loop().call_later(1 / 120, self.flush_motion)
-
-    def flush_motion(self):
-        if self.motion_timer:
-            self.motion_timer.cancel()
-            self.motion_timer = None
-        if self.motion:
-            self.output.apply(dict(self.motion, device=self.address), coalescible=True,
-                              motion_timestamp_ns=self.motion_timestamp_ns)
-            self.motion = {}
-            self.motion_timestamp_ns = None
+        self.output.apply(report, self.address)
 
     def release(self):
-        self.flush_motion()
-        self.buttons = [False] * 8
-        self.output.apply({'kind': 'release', 'device': self.address})
+        self.output.release(self.address)
 
     async def close(self):
-        self.flush_motion()
         await self.output.close()
 
 
@@ -340,6 +321,9 @@ class Backend:
     async def connection(self, key, automatic=False):
         pointer = None
         try:
+            # This task receives HID notifications and forwards them to the
+            # interactive CoreGraphics relay. Keep it responsive under load.
+            prioritize_input_thread()
             pointer = DeviceOutput(str(self.folder / 'pointer.sock'), key)
             args = SimpleNamespace(dry_run=False, device_kind=self.devices[key]['category'])
             def observe(state, **details):
@@ -491,5 +475,5 @@ if __name__ == '__main__':
     parser.add_argument('--session-token', required=True)
     parser.add_argument('--transport', default='auto')
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     asyncio.run(main(args))

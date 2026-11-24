@@ -1,7 +1,9 @@
-Raw Bluetooth 0.7.0 — experimental Intel macOS app
+Raw Bluetooth 0.7.1 — experimental Intel macOS app
 
 1. Drag Raw Bluetooth.app to Applications. Eject this disk image.
 2. Open the app from Applications.
+   For an ad-hoc-signed preview, Control-click the app and choose Open on its
+   first launch to bypass Gatekeeper.
 3. Allow Raw Bluetooth in System Settings > Privacy & Security > Accessibility
    when prompted. This permission lets the app post mouse and keyboard events
    through the logged-in desktop session; local development builds are supported.

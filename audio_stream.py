@@ -34,6 +34,8 @@ async def _read_exact(stream, size):
         if not chunk:
             break
         result.extend(chunk)
+    if len(result) != size:
+        log.info('A2DP encoder reached EOF after %d of %d requested bytes', len(result), size)
     return bytes(result)
 
 
@@ -50,14 +52,32 @@ class A2DPTestTone:
         self.stream = None
         self.process = None
         self.pump = None
+        self.packet_count = 0
+        self.prefetched_sbc = bytearray()
+
+    async def packets_with_diagnostics(self, packets):
+        async for packet in packets:
+            self.packet_count += 1
+            if self.packet_count == 1 or self.packet_count % 100 == 0:
+                log.info('Sending A2DP RTP packet #%d', self.packet_count)
+            yield packet
+
+    async def read_sbc(self, size):
+        """Read encoder bytes, consuming the pre-stream startup buffer first."""
+        prefix = bytes(self.prefetched_sbc[:size])
+        del self.prefetched_sbc[:len(prefix)]
+        if len(prefix) == size:
+            return prefix
+        return prefix + await _read_exact(self.process.stdout, size - len(prefix))
 
     async def start(self):
-
+        log.info('Opening BR/EDR A2DP link to %s', self.address)
         self.connection = await self.device.connect(
             self.address, transport=PhysicalTransport.BR_EDR, timeout=20
         )
         await self.connection.authenticate()
         await self.connection.encrypt()
+        log.info('A2DP link authenticated and encrypted for %s', self.address)
         self.protocol = await avdtp.Protocol.connect(self.connection)
         endpoints = await self.protocol.discover_remote_endpoints()
         sink = self.protocol.find_remote_sink_by_codec(
@@ -95,17 +115,28 @@ class A2DPTestTone:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        log.info('Started SBC encoder pid=%s for %s', self.process.pid, self.address)
         self.stderr_task = asyncio.create_task(self._drain_stderr())
+        # Some sinks suspend after a few seconds without RTP. Prime the
+        # encoder before negotiating A2DP, then the first RTP packet is ready
+        # as soon as the stream enters STREAMING.
+        self.prefetched_sbc.extend(await asyncio.wait_for(
+            _read_exact(self.process.stdout, 4), timeout=8
+        ))
+        if len(self.prefetched_sbc) != 4:
+            raise RuntimeError('SBC encoder ended before producing an audio frame')
+        log.info('SBC encoder primed before A2DP stream setup')
         packets = a2dp.SbcPacketSource(
-            lambda size: _read_exact(self.process.stdout, size), mtu=672
+            self.read_sbc, mtu=672
         )
-        self.pump = avdtp.MediaPacketPump(packets.packets)
+        self.pump = avdtp.MediaPacketPump(self.packets_with_diagnostics(packets.packets))
         source = self.protocol.add_source(sbc_configuration(), self.pump)
         source.on(source.EVENT_SUSPEND, lambda: log.warning('Audio sink requested A2DP suspend'))
         source.on(source.EVENT_ABORT, lambda: log.warning('Audio sink aborted the A2DP stream'))
         self.connection.on('disconnection', lambda reason: log.warning('A2DP Bluetooth link ended: %s', reason))
         self.stream = await self.protocol.create_stream(source, sink)
         await self.stream.start()
+        log.info('A2DP stream started: state=%s', self.stream.state)
 
     async def _drain_stderr(self):
         try:
@@ -123,6 +154,9 @@ class A2DPTestTone:
 
     async def close(self):
         # Release every resource even if the peer has already disconnected.
+        log.info('Closing A2DP session: stream_state=%s encoder_status=%s packets=%d',
+                 getattr(self.stream, 'state', 'none'),
+                 self.process.returncode if self.process else 'none', self.packet_count)
         if getattr(self, 'stderr_task', None):
             self.stderr_task.cancel()
         try:

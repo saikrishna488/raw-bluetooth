@@ -151,6 +151,31 @@ final class BluetoothModel: ObservableObject {
     var heartbeatTimer: DispatchSourceTimer?
     var sessionActivity: NSObjectProtocol?
     var systemAudioCapture: SystemAudioCapture?
+    private let audioDiagnosticQueue = DispatchQueue(label: "local.rawbluetooth.audio-diagnostics")
+
+    func recordAudioCaptureDiagnostic(_ message: String) {
+        log("System audio capture: \(message)")
+        let destination = dataDirectory.appendingPathComponent("audio-capture.log")
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+        audioDiagnosticQueue.async {
+            do {
+                try FileManager.default.createDirectory(at: self.dataDirectory, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+                let data = Data(line.utf8)
+                if !FileManager.default.fileExists(atPath: destination.path) {
+                    FileManager.default.createFile(atPath: destination.path, contents: data,
+                                                   attributes: [.posixPermissions: 0o600])
+                    return
+                }
+                let handle = try FileHandle(forWritingTo: destination)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } catch {
+                NSLog("Could not write audio capture diagnostic: \(error.localizedDescription)")
+            }
+        }
+    }
 
     func startHeartbeat() {
         stopHeartbeat()
@@ -355,6 +380,12 @@ final class BluetoothModel: ObservableObject {
         guard let session else { return }
         let fifo = session.appendingPathComponent("system-audio.fifo")
         let capture = SystemAudioCapture(fifo: fifo)
+        capture.onStopped = { [weak self] reason in
+            self?.recordAudioCaptureDiagnostic(reason)
+        }
+        capture.onDiagnostic = { [weak self] message in
+            self?.recordAudioCaptureDiagnostic(message)
+        }
         systemAudioCapture = capture
         audioPendingAddress = device.address
         status = "Starting system audio route…"

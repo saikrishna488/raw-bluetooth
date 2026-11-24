@@ -106,7 +106,7 @@ final class PointerServer {
             let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
             if count < 0 { break }
             if count == 0 { continue }
-            guard let report = try? JSONSerialization.jsonObject(with: Data(buffer.prefix(count))) as? [String: Any] else { continue }
+            guard let report = binaryReport(buffer, count: count) else { continue }
             readCount += 1
             guard motionOnly(report) else {
                 flushMotion()
@@ -130,6 +130,47 @@ final class PointerServer {
         flushMotion()
         largestReadBatch = max(largestReadBatch, readCount)
         publishDiagnosticsIfNeeded()
+    }
+
+    /// Decode the versioned, private binary protocol emitted by DatagramSender.
+    /// It intentionally carries only already-decoded HID state; no pointer
+    /// coordinates or input history are written to disk.
+    private func binaryReport(_ bytes: [UInt8], count: Int) -> [String: Any]? {
+        guard count >= 12, bytes[0] == 1 else { return nil }
+        func u16(_ offset: Int) -> UInt16 { UInt16(bytes[offset]) | UInt16(bytes[offset + 1]) << 8 }
+        func i16(_ offset: Int) -> Int64 { Int64(Int16(bitPattern: u16(offset))) }
+        func u64(_ offset: Int) -> UInt64 {
+            var value: UInt64 = 0
+            for index in 0..<8 { value |= UInt64(bytes[offset + index]) << UInt64(index * 8) }
+            return value
+        }
+        let device = String(u64(4))
+        switch bytes[1] {
+        case 1: // mouse
+            let hasButtons = bytes[2] & 1 != 0
+            guard count >= (hasButtons ? 21 : 28) else { return nil }
+            var report: [String: Any] = ["device": device, "x": i16(12), "y": i16(14), "wheel": i16(16), "pan": i16(18)]
+            if hasButtons {
+                let values = bytes[20]
+                for index in 0..<8 { report["button\(index + 1)"] = values & UInt8(1 << index) != 0 }
+            } else {
+                report["motion_timestamp_ns"] = NSNumber(value: Int64(bitPattern: u64(20)))
+            }
+            return report
+        case 2: // keyboard
+            guard count >= 14 else { return nil }
+            let keyCount = Int(bytes[12]), consumerCount = Int(bytes[13])
+            guard count == 14 + 2 * (keyCount + consumerCount) else { return nil }
+            var offset = 14
+            var keys = [Int](), consumer = [Int]()
+            for _ in 0..<keyCount { keys.append(Int(u16(offset))); offset += 2 }
+            for _ in 0..<consumerCount { consumer.append(Int(u16(offset))); offset += 2 }
+            return ["kind": "keyboard", "device": device, "keys": keys, "consumer": consumer]
+        case 3:
+            return ["kind": "release", "device": device]
+        default:
+            return nil
+        }
     }
 
     private func motionOnly(_ report: [String: Any]) -> Bool {

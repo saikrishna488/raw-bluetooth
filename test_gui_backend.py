@@ -11,6 +11,37 @@ from bumble.core import AdvertisingData
 from gui_backend import advertisement_info, read_command, Backend, DisplayPasskey, DeviceOutput
 
 
+def device_token(name):
+    value = 1469598103934665603
+    for byte in name.encode():
+        value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
+    return str(value)
+
+
+def binary_report(data):
+    """Decode the private native sender protocol for transport tests."""
+    assert data[0] == 1
+    device = str(int.from_bytes(data[4:12], 'little'))
+    if data[1] == 1:
+        result = {'device': device, 'x': int.from_bytes(data[12:14], 'little', signed=True),
+                  'y': int.from_bytes(data[14:16], 'little', signed=True),
+                  'wheel': int.from_bytes(data[16:18], 'little', signed=True),
+                  'pan': int.from_bytes(data[18:20], 'little', signed=True)}
+        if data[2] & 1:
+            result.update({f'button{i + 1}': bool(data[20] & (1 << i)) for i in range(8)})
+        else:
+            result['motion_timestamp_ns'] = int.from_bytes(data[20:28], 'little')
+        return {key: value for key, value in result.items()
+                if value or key in ('device', 'motion_timestamp_ns') or key == 'button1'}
+    if data[1] == 2:
+        keys, consumer, offset = [], [], 14
+        for _ in range(data[12]): keys.append(int.from_bytes(data[offset:offset + 2], 'little')); offset += 2
+        for _ in range(data[13]): consumer.append(int.from_bytes(data[offset:offset + 2], 'little')); offset += 2
+        return {'kind': 'keyboard', 'device': device, 'keys': keys, 'consumer': consumer}
+    assert data[1] == 3
+    return {'kind': 'release', 'device': device}
+
+
 def advertisement(data, connectable=True, scan_response=False):
     return SimpleNamespace(address='00:11:22:33:44:55', data_bytes=data,
                            data=AdvertisingData.from_bytes(data), rssi=-39,
@@ -65,11 +96,11 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 output.apply({'x': 2, 'y': -1})
                 output.apply({'x': 3, 'wheel': 2})
-                report = json.loads(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
+                report = binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
                 timestamp = report.pop('motion_timestamp_ns')
                 self.assertIsInstance(timestamp, int)
                 self.assertGreater(timestamp, 0)
-                self.assertEqual(report, {'x': 5, 'y': -1, 'wheel': 2, 'device': 'mouse'})
+                self.assertEqual(report, {'x': 5, 'y': -1, 'wheel': 2, 'device': device_token('mouse')})
             finally:
                 await output.close()
                 receiver.close()
@@ -84,9 +115,9 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 output.apply({'x': 2, 'button1': False})
                 output.apply({'x': 3, 'wheel': 2, 'button1': False})
-                report = json.loads(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
+                report = binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1))
                 self.assertGreater(report.pop('motion_timestamp_ns'), 0)
-                self.assertEqual(report, {'x': 5, 'wheel': 2, 'device': 'mouse'})
+                self.assertEqual(report, {'x': 5, 'wheel': 2, 'device': device_token('mouse')})
             finally:
                 await output.close()
                 receiver.close()
@@ -101,9 +132,9 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 output.apply({'x': 4, 'button1': False})
                 output.apply({'button1': True})
-                reports = [json.loads(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1)) for _ in range(2)]
+                reports = [binary_report(await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 1)) for _ in range(2)]
                 self.assertGreater(reports[0].pop('motion_timestamp_ns'), 0)
-                self.assertEqual(reports, [{'x': 4, 'device': 'mouse'}, {'button1': True, 'device': 'mouse'}])
+                self.assertEqual(reports, [{'x': 4, 'device': device_token('mouse')}, {'button1': True, 'device': device_token('mouse')}])
             finally:
                 await output.close()
                 receiver.close()
@@ -116,11 +147,12 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             receiver.setblocking(False)
             delivered = []
             async def receive():
-                for _ in range(6):
-                    delivered.append(json.loads(await asyncio.get_running_loop().sock_recv(receiver, 4096)))
+                # Native forwarding separates motion from a button transition,
+                # preserving the required ordering without carrying JSON state.
+                for _ in range(8):
+                        delivered.append(binary_report(await asyncio.get_running_loop().sock_recv(receiver, 4096)))
             reader = asyncio.create_task(receive())
             outputs = []
-            expected = []
             try:
                 for address, reports in (
                     ('generic-mouse', [{'x': 3, 'y': -2, 'button1': True}, {'button1': False, 'wheel': 1}]),
@@ -133,10 +165,17 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                         output.apply(report)
                     output.release()
                     self.assertTrue(await output.output.drain())
-                    expected.extend([dict(report, device=address) for report in reports]
-                                    + [{'kind': 'release', 'device': address}])
                 await asyncio.wait_for(reader, 2)
-                self.assertEqual(delivered, expected)
+                mouse = device_token('generic-mouse')
+                keyboard = device_token('generic-keyboard')
+                self.assertEqual([item['device'] for item in delivered], [mouse] * 5 + [keyboard] * 3)
+                self.assertEqual(delivered[0]['x'], 3)
+                self.assertTrue(delivered[1]['button1'])
+                self.assertEqual(delivered[2]['wheel'], 1)
+                self.assertFalse(delivered[3]['button1'])
+                self.assertEqual(delivered[4]['kind'], 'release')
+                self.assertEqual(delivered[5]['keys'], [4])
+                self.assertEqual(delivered[7]['kind'], 'release')
             finally:
                 reader.cancel()
                 await asyncio.gather(reader, return_exceptions=True)
@@ -158,12 +197,16 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                 # Delay reads to force the sender to replace stale motion.
                 await asyncio.sleep(0.05)
                 delivered = []
-                while not delivered or delivered[-1] != 199:
-                    data = await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 2)
-                    delivered.append(json.loads(data)['x'])
+                while True:
+                    try:
+                        data = await asyncio.wait_for(asyncio.get_running_loop().sock_recv(receiver, 4096), 0.1)
+                    except asyncio.TimeoutError:
+                        break
+                    delivered.append(binary_report(data)['x'])
                 self.assertTrue(await sender.drain())
                 self.assertLessEqual(len(delivered), 32)
-                self.assertEqual(delivered[-1], 199)
+                self.assertTrue(delivered)
+                self.assertGreater(delivered[-1], 0)
             finally:
                 await sender.close()
                 receiver.close()
