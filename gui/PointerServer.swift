@@ -94,26 +94,14 @@ final class PointerServer {
 
     private func read() {
         var buffer = [UInt8](repeating: 0, count: 4096)
-        var pendingMotion: [String: Any]?
         var readCount = 0
-        func flushMotion() {
-            if let motion = pendingMotion {
-                self.apply(motion)
-                pendingMotion = nil
-            }
-        }
         while !stopped {
             let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
             if count < 0 { break }
             if count == 0 { continue }
             guard let report = binaryReport(buffer, count: count) else { continue }
             readCount += 1
-            guard motionOnly(report) else {
-                flushMotion()
-                apply(report)
-                continue
-            }
-            if let timing = motionTiming(report) {
+            if motionOnly(report), let timing = motionTiming(report) {
                 latestMotionAgeMilliseconds = Int(timing.age / 1_000_000)
                 if timing.timestamp < timing.now && timing.now - timing.timestamp > Self.maximumMotionAgeNanoseconds {
                     // Do not replay relative movement accumulated while macOS
@@ -122,12 +110,11 @@ final class PointerServer {
                     continue
                 }
             }
-            if let existing = pendingMotion, existing["device"] as? String != report["device"] as? String {
-                flushMotion()
-            }
-            mergeMotion(report, into: &pendingMotion)
+            // DatagramSender already coalesces only while its native queue is
+            // congested. Applying each received motion preserves the mouse's
+            // report cadence instead of adding a second batch-level merge.
+            apply(report)
         }
-        flushMotion()
         largestReadBatch = max(largestReadBatch, readCount)
         publishDiagnosticsIfNeeded()
     }
@@ -177,16 +164,6 @@ final class PointerServer {
         guard report["kind"] == nil,
               !report.keys.contains(where: { $0.hasPrefix("button") }) else { return false }
         return ["x", "y", "wheel", "pan"].contains { report[$0] != nil }
-    }
-
-    private func mergeMotion(_ report: [String: Any], into pending: inout [String: Any]?) {
-        guard var merged = pending else { pending = report; return }
-        for key in ["x", "y", "wheel", "pan"] where report[key] != nil {
-            let value = amount(report, key)
-            let prior = amount(merged, key)
-            merged[key] = max(Int64(-32768), min(Int64(32767), prior + value))
-        }
-        pending = merged
     }
 
     private func motionTiming(_ report: [String: Any]) -> (timestamp: UInt64, now: UInt64, age: UInt64)? {
