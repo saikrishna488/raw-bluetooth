@@ -43,12 +43,14 @@ def build():
                                     '-I' + sysconfig.get_path('include'), str(ROOT / 'native/driver.cpp'),
                                     '-Wl,-rpath,@loader_path/build/native', '-o', str(temporary)], check=True)
     temporary.replace(backend)
-    broker = folder / 'raw-bluetooth-usb'
-    temporary_broker = folder / 'raw-bluetooth-usb.new'
-    subprocess.run(native_command + [str(ROOT / 'native/usb_service.cpp'),
-                                    '-Wl,-rpath,@loader_path', '-o', str(temporary_broker)], check=True)
-    temporary_broker.replace(broker)
-    subprocess.run(['codesign', '--force', '--sign', '-', str(broker)], check=True)
+    for name, source in (('raw-bluetooth-usb', 'usb_service.cpp'),
+                         ('raw-bluetooth-scan', 'raw_scan.cpp')):
+        executable = folder / name
+        temporary_executable = executable.with_suffix('.new')
+        subprocess.run(native_command + [str(ROOT / 'native' / source),
+                                        '-Wl,-rpath,@loader_path', '-o', str(temporary_executable)], check=True)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(temporary_executable)], check=True)
+        temporary_executable.replace(executable)
     return output
 
 

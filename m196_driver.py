@@ -12,6 +12,7 @@ from bumble.core import AdvertisingData, UUID
 from bumble.device import Device, DeviceConfiguration, Peer
 from bumble.pairing import PairingConfig, PairingDelegate
 from usb_service import open_driver_transport as open_transport
+from usb_service import input_clock_ns, received_at_ns
 from adapters import select_transport
 from hid_backend import MouseReports, KeyboardReports
 from pointer import Pointer, request_accessibility
@@ -55,6 +56,13 @@ async def find_mouse(device, args):
     finally:
         device.remove_listener('advertisement', advertisement)
         await device.stop_scanning()
+
+
+def timed_mouse_report(report, timestamp, now):
+    if now - timestamp > 50_000_000:
+        return {key: value for key, value in report.items()
+                if key not in ('x', 'y', 'wheel', 'pan')}
+    return dict(report, motion_timestamp_ns=timestamp)
 
 
 async def use_mouse(device, address, args, pointer, observer=None):
@@ -105,20 +113,34 @@ async def use_mouse(device, address, args, pointer, observer=None):
         subscriptions = 0
         last_update = 0
 
+        ingest_hid = getattr(pointer, 'ingest_hid', None)
+        parser = getattr(decoder, '_parser', None)
+
         def receive(report_id, value):
             nonlocal count, last_update
             try:
-                decoded = decoder.decode(report_id, value)
-                if decoded is None:
-                    return
+                timestamp = received_at_ns.get() or input_clock_ns()
+                log_report = not keyboard and (args.dry_run or count < 5)
+                if ingest_hid is not None and parser is not None:
+                    motion = ingest_hid(parser, report_id, value, timestamp, keyboard)
+                    if motion is None:
+                        return
+                    if log_report:
+                        decoded = decoder.decode(report_id, value)
+                else:
+                    decoded = decoder.decode(report_id, value)
+                    if decoded is None:
+                        return
+                    motion = decoded.get('x', 0), decoded.get('y', 0)
+                    if pointer:
+                        pointer.apply(decoded if keyboard else
+                                      timed_mouse_report(decoded, timestamp, input_clock_ns()))
                 count += 1
-                if not keyboard and (args.dry_run or count <= 5):
+                if log_report:
                     print(f'REPORT id={report_id} raw={value.hex()} decoded={decoded}', flush=True)
-                if pointer:
-                    pointer.apply(decoded)
                 now = asyncio.get_running_loop().time()
                 if now - last_update >= 0.5:
-                    notify('input', reports=count, x=decoded.get('x', 0), y=decoded.get('y', 0))
+                    notify('input', reports=count, x=motion[0], y=motion[1])
                     last_update = now
             except Exception:
                 logging.exception('HID report processing failed')

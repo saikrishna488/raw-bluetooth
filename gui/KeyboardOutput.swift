@@ -18,16 +18,16 @@ final class KeyboardOutput {
         224:59,225:56,226:58,227:55,228:62,229:60,230:61,231:54
     ]
     static let mediaMap: [Int: Int] = [0xe9:0,0xea:1,0xe2:7,0xcd:16,0xb5:17,0xb6:18,0x6f:2,0x70:3]
-    private var held: [String: Set<Int>] = [:]
-    private var consumers: [String: Set<Int>] = [:]
+    private let state = rawbt_keyboard_create()
     private var current = Set<Int>()
-    private var media = Set<Int>()
     private var caps = false
     private let queue: DispatchQueue
     private var repeatTimer: DispatchSourceTimer?
     private var repeating: Int?
 
     init(queue: DispatchQueue) { self.queue = queue }
+
+    deinit { rawbt_keyboard_destroy(state) }
 
     var flags: CGEventFlags {
         var result: CGEventFlags = []
@@ -39,24 +39,34 @@ final class KeyboardOutput {
         return result
     }
 
-    func apply(_ report: [String: Any], device: String) {
-        let keys = (report["keys"] as? [Int] ?? []).filter { Self.keyMap[$0] != nil }
-        let consumer = (report["consumer"] as? [Int] ?? []).filter { Self.mediaMap[$0] != nil }
-        held[device] = Set(keys)
-        consumers[device] = Set(consumer)
-        reconcile()
+    func apply(keys: [UInt16], consumer: [UInt16], device: UInt64) {
+        update(device: device, mode: 0,
+               keys: keys.filter { Self.keyMap[Int($0)] != nil },
+               consumer: consumer.filter { Self.mediaMap[Int($0)] != nil })
     }
 
-    func release(device: String) {
-        held.removeValue(forKey: device)
-        consumers.removeValue(forKey: device)
-        reconcile()
-    }
+    func release(device: UInt64) { update(device: device, mode: 1) }
 
-    func releaseAll() {
-        held.removeAll()
-        consumers.removeAll()
-        reconcile()
+    func releaseAll() { update(device: 0, mode: 2) }
+
+    private func update(device: UInt64, mode: Int32, keys: [UInt16] = [], consumer: [UInt16] = []) {
+        rawbt_keyboard_update(state, device, mode, keys, keys.count, consumer, consumer.count,
+                              Unmanaged.passUnretained(self).toOpaque()) { owner, usage, down, media in
+            guard let owner else { return }
+            let output = Unmanaged<KeyboardOutput>.fromOpaque(owner).takeUnretainedValue()
+            let usage = Int(usage)
+            if media != 0 {
+                output.mediaKey(usage, down: down != 0)
+                return
+            }
+            if down == 0 && output.repeating == usage {
+                output.repeatTimer?.cancel()
+                output.repeatTimer = nil
+                output.repeating = nil
+            }
+            output.key(usage, down: down != 0)
+            if down != 0 && usage < 224 && usage != 57 { output.startRepeat(usage) }
+        }
     }
 
     private func key(_ usage: Int, down: Bool, autoRepeat: Bool = false) {
@@ -65,11 +75,7 @@ final class KeyboardOutput {
             if down { current.insert(usage) } else { current.remove(usage) }
             if usage == 57 && down { caps.toggle() }
         }
-        let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
-        if usage >= 224 { event?.type = .flagsChanged }
-        event?.flags = flags
-        if autoRepeat { event?.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
-        event?.post(tap: .cghidEventTap)
+        rawbt_post_key(code, down ? 1 : 0, usage >= 224 ? 1 : 0, autoRepeat ? 1 : 0, flags)
     }
 
     private func mediaKey(_ usage: Int, down: Bool) {
@@ -91,23 +97,4 @@ final class KeyboardOutput {
         timer.resume()
     }
 
-    private func reconcile() {
-        let next = held.values.reduce(into: Set<Int>()) { $0.formUnion($1) }
-        let releases = current.subtracting(next)
-        let presses = next.subtracting(current)
-        if let repeating = repeating, releases.contains(repeating) {
-            repeatTimer?.cancel()
-            repeatTimer = nil
-            self.repeating = nil
-        }
-        for usage in releases.sorted(by: { ($0 >= 224 ? 1 : 0, $0) < ($1 >= 224 ? 1 : 0, $1) }) { key(usage, down: false) }
-        for usage in presses.sorted(by: { ($0 >= 224 ? 0 : 1, $0) < ($1 >= 224 ? 0 : 1, $1) }) {
-            key(usage, down: true)
-            if usage < 224 && usage != 57 { startRepeat(usage) }
-        }
-        let nextMedia = consumers.values.reduce(into: Set<Int>()) { $0.formUnion($1) }
-        for usage in media.subtracting(nextMedia) { mediaKey(usage, down: false) }
-        for usage in nextMedia.subtracting(media) { mediaKey(usage, down: true) }
-        media = nextMedia
-    }
 }

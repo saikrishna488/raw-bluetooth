@@ -11,6 +11,8 @@ cp gui/Info.plist "$app/Contents/Info.plist"
 if [[ -n "${RAW_BT_BUNDLE_IDENTIFIER:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $RAW_BT_BUNDLE_IDENTIFIER" "$app/Contents/Info.plist"
 fi
-xcrun swiftc -O -parse-as-library gui/RawBluetooth.swift gui/PointerServer.swift gui/KeyboardOutput.swift gui/VirtualHIDServer.swift gui/SystemAudioCapture.swift gui/SessionChannel.swift -o "$app/Contents/MacOS/RawBluetooth" -framework SwiftUI -framework AppKit -framework IOKit -framework ServiceManagement -framework ScreenCaptureKit -framework CoreMedia -target x86_64-apple-macosx13.0
+mkdir -p build/native
+xcrun clang++ -std=c++17 -O3 -ffp-contract=off -target x86_64-apple-macosx13.0 -c native/desktop.cpp -o build/native/desktop.o
+xcrun swiftc -import-objc-header native/desktop.h build/native/desktop.o -lc++ -O -parse-as-library gui/RawBluetooth.swift gui/PointerServer.swift gui/KeyboardOutput.swift gui/VirtualHIDServer.swift gui/SystemAudioCapture.swift gui/SessionChannel.swift -o "$app/Contents/MacOS/RawBluetooth" -framework SwiftUI -framework AppKit -framework IOKit -framework ServiceManagement -framework ScreenCaptureKit -framework CoreMedia -target x86_64-apple-macosx13.0
 .venv/bin/python gui/sign_app.py "$app"
 echo "Built $app"

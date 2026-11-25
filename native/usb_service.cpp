@@ -114,8 +114,10 @@ struct Session {
     std::condition_variable output_ready;
     std::deque<std::vector<uint8_t>> output;
     size_t output_bytes = 0;
+    bool timestamped;
     static constexpr size_t maximum_output_bytes = 1024 * 1024;
-    explicit Session(int fd, const std::string& name) : device(name), socket(fd) {}
+    explicit Session(int fd, const std::string& name, bool timestamped)
+        : device(name), socket(fd), timestamped(timestamped) {}
     static void received(libusb_transfer* transfer) noexcept {
         auto& input = *static_cast<Input*>(transfer->user_data);
         auto& self = *input.session;
@@ -127,10 +129,17 @@ struct Session {
                 // resubmit this transfer immediately; the writer handles
                 // socket backpressure on its own interactive-QoS thread.
                 if (transfer->actual_length > 0) {
+                    const auto received_at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
                     std::lock_guard<std::mutex> lock(self.output_mutex);
-                    if (self.output_bytes + size_t(transfer->actual_length) + 1 > maximum_output_bytes) throw std::runtime_error("USB output queue exceeded limit");
+                    const uint32_t length = uint32_t(transfer->actual_length) + 1;
+                    const size_t size = length + (self.timestamped ? 12 : 0);
+                    if (self.output_bytes + size > maximum_output_bytes) throw std::runtime_error("USB output queue exceeded limit");
                     auto& packet = self.output.emplace_back();
-                    packet.reserve(size_t(transfer->actual_length) + 1);
+                    packet.reserve(size);
+                    if (self.timestamped) {
+                        for (unsigned i = 0; i < 8; ++i) packet.push_back(uint8_t(received_at >> (8 * i)));
+                        for (unsigned i = 0; i < 4; ++i) packet.push_back(uint8_t(length >> (8 * i)));
+                    }
                     packet.push_back(input.type);
                     packet.insert(packet.end(), transfer->buffer, transfer->buffer + transfer->actual_length);
                     self.output_bytes += packet.size();
@@ -274,8 +283,9 @@ void serve(uid_t uid, bool test_mode, const std::string& path) {
             if (busy) throw std::runtime_error("USB adapter service is already in use");
             if (test_mode) throw std::runtime_error("USB unavailable in protocol test mode");
             if (client.joinable()) client.join();
-            auto session = std::make_unique<Session>(accepted.value, name);
-            send_json(accepted.value, {{"ready", true}}); ready = true;
+            const bool timestamped = message.contains("rx_version") && message["rx_version"] == 1;
+            auto session = std::make_unique<Session>(accepted.value, name, timestamped);
+            send_json(accepted.value, {{"ready", true}, {"rx_version", timestamped ? 1 : 0}}); ready = true;
             busy = true;
             int fd = accepted.value;
             client = std::thread([session = std::move(session), fd, &busy]() mutable {

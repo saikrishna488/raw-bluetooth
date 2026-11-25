@@ -9,16 +9,16 @@ field decoding also execute in C++.
 Python remains for Bumble's Bluetooth protocols and the asynchronous operations
 that invoke them: discovering services, pairing/encryption, GATT subscriptions,
 connection cleanup, and A2DP/AVDTP session management. It is bundled in the app.
-The legacy raw scanner, firmware diagnostic, build scripts, and tests also remain
-Python. This migration does not replace Bumble or claim to eliminate Python.
+The firmware diagnostic, build scripts, and tests also use Python. The raw USB
+scanner is a standalone C++ executable launched by the existing Python CLI.
 
 ```mermaid
 flowchart LR
-    GUI[Swift GUI] <-->|command JSON and event JSONL| Bridge[Python async bridge + Bumble]
+    GUI[Swift GUI] <-->|session JSON messages| Bridge[Python async bridge + Bumble]
     Bridge <-->|CPython extension calls| Core[C++ backend and HID decoder]
     Bridge <-->|private Unix stream: HCI packets| USB[C++ USB broker]
     USB <-->|libusb| Adapter[External Bluetooth dongle]
-    Core -->|ordered JSON datagrams| Output[Existing Swift input output]
+    Core -->|versioned binary datagrams| Output[C++ desktop pointer output]
 ```
 
 ## Two boundaries
@@ -47,15 +47,17 @@ flowchart LR
 
 For example, when a mouse moves, C++ receives USB bytes and forwards HCI packets
 to Bumble. Bumble handles Bluetooth/L2CAP/ATT and delivers a HID notification.
-The bridge passes its report bytes to the native decoder, which extracts motion
-and button fields. A native sender forwards the decoded JSON report to the
-unchanged Swift input server, which posts macOS events under the logged-in user.
+The GUI bridge passes report bytes to a single native decode-and-enqueue call.
+The desktop receiver parses the resulting binary datagram and posts pointer and keyboard events
+through CoreGraphics under the logged-in user. The desktop also uses a native
+PCM converter for ScreenCaptureKit audio. Discovery expiry and reconnect checks
+iterate session mappings directly through the CPython API.
 
 ## Build and installation
 
 Run `.venv/bin/python native/build.py` after installing the pinned development
 dependencies. It builds `_hid_native`, `_driver_native`, and
-`build/native/raw-bluetooth-usb`, and copies the pinned libusb runtime. Compilation
+`build/native/raw-bluetooth-usb`, and `build/native/raw-bluetooth-scan`. It copies the pinned libusb runtime. Compilation
 targets macOS 13+ and replaces binaries atomically so an already running process
 keeps its existing mapped image. The vendored JSON/header versions and licenses
 are documented in `native/vendor/README.md`.

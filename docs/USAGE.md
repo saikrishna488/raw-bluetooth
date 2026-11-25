@@ -90,9 +90,10 @@ Use `.venv/bin/python m196_driver.py --help` for the executable reference. The d
 
 ## Diagnostic tools
 
-Direct USB HCI BLE scan, without Bumble or CoreBluetooth:
+For a direct USB HCI BLE scan, build the native scanner from the checkout first.
 
 ```sh
+.venv/bin/python native/build.py
 sudo .venv/bin/python -u raw_scan.py --seconds 45
 ```
 

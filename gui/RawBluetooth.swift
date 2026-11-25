@@ -5,6 +5,30 @@ import ApplicationServices
 import ServiceManagement
 import UniformTypeIdentifiers
 
+private final class WorkerErrorTail: @unchecked Sendable {
+    private let finished = DispatchGroup()
+    private var tail = Data()
+
+    init() { finished.enter() }
+
+    func drain(_ handle: FileHandle) {
+        defer { finished.leave() }
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            tail.append(chunk)
+            if tail.count > 8192 {
+                tail.removeFirst(tail.count - 8192)
+            }
+        }
+    }
+
+    func result() -> Data {
+        finished.wait()
+        return tail
+    }
+}
+
 struct NearbyDevice: Identifiable {
     var address: String
     var name: String
@@ -301,10 +325,12 @@ final class BluetoothModel: ObservableObject {
                 process.arguments = ["-e", "do shell script \(appleQuote(shell)) with administrator privileges"]
             }
             let errors = Pipe()
+            let errorReader = DispatchQueue(label: "local.rawbluetooth.worker-errors")
+            let errorTail = WorkerErrorTail()
             process.standardError = errors
             process.standardOutput = FileHandle.nullDevice
             process.terminationHandler = { [weak self] process in
-                let data = errors.fileHandleForReading.readDataToEndOfFile()
+                let data = errorTail.result()
                 let message = String(data: data, encoding: .utf8) ?? ""
                 DispatchQueue.main.async {
                     guard let self = self else { return }
@@ -332,6 +358,9 @@ final class BluetoothModel: ObservableObject {
             status = usbServiceAvailable ? "Opening adapter…" : "Authorize adapter access…"
             log(usbServiceAvailable ? "Connecting through the installed USB service" : "Requesting access to the USB Bluetooth adapter")
             try process.run()
+            errorReader.async {
+                errorTail.drain(errors.fileHandleForReading)
+            }
             startHeartbeat()
         } catch {
             stopHeartbeat()
@@ -344,7 +373,11 @@ final class BluetoothModel: ObservableObject {
     }
 
     func scan() {
-        if !active { start(); return }
+        if !active {
+            start()
+            if active { command("scan") }
+            return
+        }
         if busy { return }
         errorMessage = nil
         command("scan")

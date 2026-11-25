@@ -13,7 +13,8 @@ Follow the [README quick start](README.md#quick-start). Python dependencies belo
 .venv/bin/python -m unittest discover -v
 c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer native/test_core.cpp -o build/native/test-core-sanitized
 build/native/test-core-sanitized
-xcrun swiftc -parse-as-library gui/PointerServer.swift gui/KeyboardOutput.swift gui/test_pointer_bounds.swift -o /tmp/raw-bt-pointer-bounds-tests -framework AppKit
+xcrun clang++ -std=c++17 -O3 -c native/desktop.cpp -o build/native/desktop.o
+xcrun swiftc -import-objc-header native/desktop.h build/native/desktop.o -lc++ -parse-as-library gui/PointerServer.swift gui/KeyboardOutput.swift gui/VirtualHIDServer.swift gui/test_pointer_bounds.swift -o /tmp/raw-bt-pointer-bounds-tests -framework AppKit -framework IOKit
 /tmp/raw-bt-pointer-bounds-tests
 .venv/bin/pip check
 git diff --check

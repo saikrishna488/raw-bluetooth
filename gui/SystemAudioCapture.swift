@@ -18,6 +18,7 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
     // buffers while macOS is silent, so supply 20 ms of silent stereo PCM to
     // keep the SBC pipeline and sink alive between captured buffers.
     private let silenceFrame = [Float](repeating: 0, count: 960 * 2)
+    private let pcmContext = rawbt_pcm_create()
     private var lastAudioWriteNs: UInt64 = 0
     private var loggedSilence = false
     private var loggedCaptureAudio = false
@@ -28,6 +29,8 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
         signal(SIGPIPE, SIG_IGN)
         self.fifo = fifo
     }
+
+    deinit { rawbt_pcm_destroy(pcmContext) }
 
     func start() async throws {
         signal(SIGPIPE, SIG_IGN)
@@ -195,45 +198,25 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
 
         let sampleBytes = Int(basic.mBitsPerChannel / 8)
         let planar = basic.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
-        let frames = planar && list.count >= 2
-            ? min(Int(list[0].mDataByteSize), Int(list[1].mDataByteSize)) / sampleBytes
-            : (list.first.map { Int($0.mDataByteSize) / (sampleBytes * 2) } ?? 0)
-        guard frames > 0 else { return }
-        var input = [Float](repeating: 0, count: frames * 2)
-        for frame in 0..<frames {
-            for channel in 0..<2 {
-                let buffer = list[planar ? channel : 0]
-                guard let data = buffer.mData else { return }
-                let index = planar ? frame : frame * 2 + channel
-                let value: Float
-                if isFloat && basic.mBitsPerChannel == 32 {
-                    value = data.assumingMemoryBound(to: Float.self)[index]
-                } else if basic.mBitsPerChannel == 16 {
-                    value = Float(data.assumingMemoryBound(to: Int16.self)[index]) / 32768
-                } else {
-                    value = Float(Double(data.assumingMemoryBound(to: Int32.self)[index]) / 2147483648)
-                }
-                input[frame * 2 + channel] = value
-            }
+        guard let first = list.first, let left = first.mData else { return }
+        let right: UnsafeMutableRawPointer?
+        let frames: Int
+        if planar {
+            guard list.count >= 2, let second = list[1].mData else { return }
+            right = second
+            frames = min(Int(first.mDataByteSize), Int(list[1].mDataByteSize)) / sampleBytes
+        } else {
+            right = nil
+            frames = Int(first.mDataByteSize) / (sampleBytes * 2)
         }
-        let outputFrames = max(1, Int(Double(frames) * 48000 / basic.mSampleRate))
-        var pcm = [Float](repeating: 0, count: outputFrames * 2)
-        for frame in 0..<outputFrames {
-            let position = Double(frame) * basic.mSampleRate / 48000
-            let low = min(Int(position), frames - 1)
-            let high = min(low + 1, frames - 1)
-            let fraction = Float(position - Double(low))
-            for channel in 0..<2 {
-                let a = input[low * 2 + channel]
-                let b = input[high * 2 + channel]
-                pcm[frame * 2 + channel] = a + (b - a) * fraction
-            }
+        var samples = 0
+        let converted = withExtendedLifetime(retained) {
+            rawbt_pcm_convert(pcmContext, left, right, frames, Int32(basic.mBitsPerChannel),
+                              isFloat ? 1 : 0, basic.mSampleRate, &samples)
         }
-
-        let expected = pcm.count * MemoryLayout<Float>.size
-        let written = pcm.withUnsafeBytes { buffer in
-            Darwin.write(fd, buffer.baseAddress, buffer.count)
-        }
+        guard let pcm = converted else { return }
+        let expected = samples * MemoryLayout<Float>.size
+        let written = Darwin.write(fd, pcm, expected)
         if written == expected {
             lastAudioWriteNs = DispatchTime.now().uptimeNanoseconds
             if !loggedCaptureAudio {

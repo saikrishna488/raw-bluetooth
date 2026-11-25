@@ -11,6 +11,10 @@ class SocketPointer:
         """Hand a decoded HID report directly to the native binary sender."""
         _driver_native.sender_enqueue_report(self._handle, device or report.get('device', 'default'), report)
 
+    def ingest_hid(self, parser, report_id, data, timestamp, keyboard, device):
+        return _driver_native.sender_ingest_hid(
+            self._handle, parser, device, report_id, bytes(data), timestamp, keyboard)
+
     def release(self, device='default'):
         self.apply({'kind': 'release'}, device)
 

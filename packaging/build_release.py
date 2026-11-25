@@ -106,7 +106,10 @@ def main(unsigned=False):
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', app.parent / 'READ ME FIRST.txt')
     shutil.copy2(ROOT / 'packaging/INSTALL.txt', resources / 'INSTALL.txt')
     shutil.copy2(ROOT / 'packaging/usb-service-install.sh', resources / 'usb-service-install.sh')
-    run('xcrun', 'swiftc', '-O', '-parse-as-library', 'gui/RawBluetooth.swift', 'gui/PointerServer.swift', 'gui/KeyboardOutput.swift',
+    desktop_object = BUILD / 'desktop.o'
+    run('xcrun', 'clang++', '-std=c++17', '-O3', '-ffp-contract=off', '-target', 'x86_64-apple-macosx13.0',
+        '-c', 'native/desktop.cpp', '-o', desktop_object)
+    run('xcrun', 'swiftc', '-import-objc-header', 'native/desktop.h', desktop_object, '-lc++', '-O', '-parse-as-library', 'gui/RawBluetooth.swift', 'gui/PointerServer.swift', 'gui/KeyboardOutput.swift',
         'gui/VirtualHIDServer.swift', 'gui/SystemAudioCapture.swift', 'gui/SessionChannel.swift', '-o', macos / 'RawBluetooth',
         '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'IOKit', '-framework', 'ServiceManagement', '-framework', 'ScreenCaptureKit', '-framework', 'CoreMedia',
         '-target', 'x86_64-apple-macosx13.0')

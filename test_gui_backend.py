@@ -86,6 +86,79 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_sender_preserves_usb_receive_timestamp(self):
+        from usb_service import input_clock_ns
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+                receiver.bind(path)
+                receiver.setblocking(False)
+                output = DeviceOutput(path, 'mouse')
+                try:
+                    timestamp = input_clock_ns() - 10_000_000
+                    output.apply({'x': 2, 'motion_timestamp_ns': timestamp})
+                    packet = await asyncio.wait_for(
+                        asyncio.get_running_loop().sock_recv(receiver, 4096), 1)
+                    self.assertEqual(binary_report(packet)['motion_timestamp_ns'], timestamp)
+                finally:
+                    await output.close()
+
+    async def test_native_hid_ingest_preserves_stale_button_transitions(self):
+        from native_hid import MouseReports
+        from usb_service import input_clock_ns
+
+        decoder = MouseReports(bytes.fromhex('05091901290115002501750195018102'
+                                              '750795018103050109301581257f750895018106'))
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder:
+            path = str(Path(folder) / 'pointer.sock')
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+                receiver.bind(path)
+                receiver.setblocking(False)
+                output = DeviceOutput(path, 'mouse')
+                try:
+                    for down in (True, False):
+                        motion = output.ingest_hid(decoder._parser, 0, bytes((down, 7)),
+                                                   input_clock_ns() - 100_000_000, False)
+                        self.assertEqual(motion, (7, 0))
+                        packet = await asyncio.wait_for(
+                            asyncio.get_running_loop().sock_recv(receiver, 4096), 1)
+                        report = binary_report(packet)
+                        self.assertEqual(report.get('x', 0), 0)
+                        self.assertEqual(report['button1'], down)
+                finally:
+                    await output.close()
+
+    def test_stale_movement_preserves_button_release(self):
+        from m196_driver import timed_mouse_report
+
+        report = {'x': 3, 'wheel': 1, 'button1': False}
+        self.assertEqual(timed_mouse_report(report, 100, 50_000_101), {'button1': False})
+        self.assertEqual(timed_mouse_report(report, 100, 50_000_100),
+                         dict(report, motion_timestamp_ns=100))
+
+    async def test_reconnect_scan_yields_to_explicit_discovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            backend = Backend(path, 'test', saved_path=path / 'saved.json')
+            backend.device = SimpleNamespace(
+                start_scanning=AsyncMock(), stop_scanning=AsyncMock(),
+                start_discovery=AsyncMock(), classic_enabled=True, discovering=False,
+            )
+            await backend.resume_scan()
+            backend.device.start_scanning.assert_not_awaited()
+            backend.saved.devices['mouse'] = {'auto_reconnect': True}
+            await backend.resume_scan()
+            backend.device.start_scanning.assert_awaited_once_with(
+                legacy=True, active=False, scan_interval=100, scan_window=10)
+            backend.device.start_discovery.assert_not_awaited()
+            await backend.scan()
+            backend.device.stop_scanning.assert_awaited_once()
+            backend.device.start_discovery.assert_awaited_once()
+            await backend.pause()
+            self.assertFalse(backend.scanning)
+            self.assertEqual(backend.discovery_until, 0)
+
     async def test_mouse_motion_and_scroll_preserve_normal_report_cadence(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as folder:
             path = str(Path(folder) / 'pointer.sock')
@@ -192,9 +265,9 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             receiver.setblocking(False)
             sender = SocketPointer(path)
             try:
-                for i in range(200):
-                    sender.apply({'x': i, 'padding': 'x' * 128}, coalescible=True)
-                # Delay reads to force the sender to replace stale motion.
+                for i in range(100, 300):
+                    sender.apply({'x': i})
+                # Delay reads to exercise the sender's drop policy.
                 await asyncio.sleep(0.05)
                 delivered = []
                 while True:
@@ -206,7 +279,8 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await sender.drain())
                 self.assertLessEqual(len(delivered), 32)
                 self.assertTrue(delivered)
-                self.assertGreater(delivered[-1], 0)
+                self.assertEqual(delivered, sorted(set(delivered)))
+                self.assertTrue(all(100 <= value < 300 for value in delivered))
             finally:
                 await sender.close()
                 receiver.close()

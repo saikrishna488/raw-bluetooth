@@ -1,5 +1,7 @@
 """Native broker protocol tests never open or claim a USB controller."""
 import asyncio
+import struct
+from usb_service import USBPacketSource, received_at_ns
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,20 @@ BROKER = Path(__file__).resolve().parent / 'build/native/raw-bluetooth-usb'
 
 
 class USBServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timestamped_and_legacy_packet_readers(self):
+        packet = b'\x04\x0e\x00'
+        for timestamped in (True, False):
+            reader = asyncio.StreamReader()
+            if timestamped:
+                reader.feed_data(struct.pack('<QI', 123, len(packet)))
+            reader.feed_data(packet)
+            source = USBPacketSource(reader, timestamped)
+            self.assertEqual(await source.receive(), packet)
+            if timestamped:
+                self.assertEqual(received_at_ns.get(), 123)
+            else:
+                self.assertGreater(received_at_ns.get(), 123)
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory(dir='/tmp')
         self.path = Path(self.temp.name) / 'usb.sock'

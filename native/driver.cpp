@@ -5,6 +5,8 @@
 #include "pointer.hpp"
 #include "sender.hpp"
 #include "hci.hpp"
+#include "hid.hpp"
+#include "discovery.hpp"
 #include <cstdlib>
 #include <pthread.h>
 #include <sys/qos.h>
@@ -221,6 +223,52 @@ PyObject* sender_enqueue(PyObject*, PyObject* args) {
     PyErr_SetString(PyExc_RuntimeError, "JSON input packets are no longer supported; use sender_enqueue_report");
     return nullptr;
 }
+PyObject* sender_ingest_hid(PyObject*, PyObject* args) {
+    PyObject *sender_handle, *parser_handle;
+    const char *device, *bytes;
+    unsigned id;
+    Py_ssize_t length;
+    unsigned long long timestamp;
+    int keyboard;
+    if (!PyArg_ParseTuple(args, "OOsIy#Kp", &sender_handle, &parser_handle, &device,
+                          &id, &bytes, &length, &timestamp, &keyboard)) return nullptr;
+    auto* sender = static_cast<DatagramSender*>(PyCapsule_GetPointer(sender_handle, sender_name));
+    if (!sender) return nullptr;
+    auto* parser = static_cast<hid::Parser*>(PyCapsule_GetPointer(parser_handle, hid::capsule_name));
+    if (!parser) return nullptr;
+    try {
+        auto report = hid::decode(*parser, id, reinterpret_cast<const uint8_t*>(bytes), length, keyboard);
+        if (report.rollover) Py_RETURN_NONE;
+        InputReport input;
+        input.device = device;
+        if (keyboard) {
+            input.kind = InputKind::keyboard;
+            parser->held[id] = std::move(report.keyboard);
+            std::set<uint32_t> keys, consumers;
+            for (const auto& entry : parser->held) {
+                keys.insert(entry.second.keys.begin(), entry.second.keys.end());
+                consumers.insert(entry.second.consumers.begin(), entry.second.consumers.end());
+            }
+            input.keys.assign(keys.begin(), keys.end());
+            input.consumers.assign(consumers.begin(), consumers.end());
+        } else {
+            input.button_mask = report.button_mask;
+            input.button_values = report.buttons;
+            input.timestamp = timestamp;
+            const auto now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (timestamp >= now || now - timestamp <= 50'000'000) {
+                auto axis = [&](int index) { return int32_t(std::clamp(report.axes[index], int64_t(-32768), int64_t(32767))); };
+                input.x = axis(0);
+                input.y = axis(1);
+                input.wheel = axis(2);
+                input.pan = axis(3);
+            }
+        }
+        sender->enqueue_report(input);
+        return Py_BuildValue("(LL)", static_cast<long long>(report.axes[0]), static_cast<long long>(report.axes[1]));
+    } catch (...) { return error(); }
+}
+
 long report_number(PyObject* report, const char* key, bool* present = nullptr) {
     PyObject* value = PyMapping_GetItemString(report, const_cast<char*>(key));
     if (!value) { PyErr_Clear(); if (present) *present = false; return 0; }
@@ -257,6 +305,7 @@ PyObject* sender_enqueue_report(PyObject*, PyObject* args) {
         Py_XDECREF(kind);
         if (input.kind == InputKind::keyboard) { report_usages(report, "keys", input.keys); report_usages(report, "consumer", input.consumers); }
         else if (input.kind == InputKind::mouse) {
+            input.timestamp = uint64_t(std::max(0L, report_number(report, "motion_timestamp_ns")));
             input.x = int32_t(report_number(report, "x")); input.y = int32_t(report_number(report, "y"));
             input.wheel = int32_t(report_number(report, "wheel")); input.pan = int32_t(report_number(report, "pan"));
             for (int index = 1; index <= 8; ++index) { char key[9]; snprintf(key, sizeof(key), "button%d", index); bool present; auto value = report_number(report, key, &present); if (present) { input.button_mask |= uint8_t(1 << (index - 1)); if (value) input.button_values |= uint8_t(1 << (index - 1)); } }
@@ -288,15 +337,23 @@ PyObject* input_qos(PyObject*, PyObject*) {
     // thread. Do this once per active input connection, not for scanning.
     return PyBool_FromLong(pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0);
 }
+PyObject* input_clock_ns(PyObject*, PyObject*) {
+    return PyLong_FromUnsignedLongLong(clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+}
 PyMethodDef methods[] = {
     {"execute", execute, METH_VARARGS, nullptr},
     {"journal_create", journal_create, METH_VARARGS, nullptr}, {"journal_emit", journal_emit, METH_VARARGS, nullptr}, {"journal_close", journal_close, METH_O, nullptr},
     {"pointer_create", pointer_create, METH_NOARGS, nullptr}, {"pointer_apply", pointer_apply, METH_VARARGS, nullptr}, {"pointer_release", pointer_release, METH_O, nullptr},
     {"pointer_bridge", run_pointer_bridge, METH_VARARGS, nullptr},
     {"sender_create", sender_create, METH_VARARGS, nullptr}, {"sender_enqueue", sender_enqueue, METH_VARARGS, nullptr},
+    {"touch_advertisement", discovery::touch_advertisement, METH_VARARGS, nullptr},
+    {"expire_devices", discovery::expire_devices, METH_VARARGS, nullptr},
+    {"reconnect_candidates", discovery::reconnect_candidates, METH_VARARGS, nullptr},
+    {"sender_ingest_hid", sender_ingest_hid, METH_VARARGS, nullptr},
     {"sender_enqueue_report", sender_enqueue_report, METH_VARARGS, nullptr},
     {"sender_drain", sender_drain, METH_VARARGS, nullptr}, {"sender_close", sender_close, METH_O, nullptr},
     {"input_qos", input_qos, METH_NOARGS, nullptr},
+    {"input_clock_ns", input_clock_ns, METH_NOARGS, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };
 PyModuleDef module = {PyModuleDef_HEAD_INIT, "_driver_native", nullptr, -1, methods};

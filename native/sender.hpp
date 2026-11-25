@@ -20,12 +20,17 @@ struct InputReport {
     InputKind kind = InputKind::mouse;
     int32_t x = 0, y = 0, wheel = 0, pan = 0;
     uint8_t button_mask = 0, button_values = 0;
+    uint64_t timestamp = 0;
     std::vector<uint16_t> keys, consumers;
 };
 
 class DatagramSender {
     static constexpr size_t motion_backlog_threshold = 4;
-    struct Packet { std::string bytes; bool motion = false; uint64_t device = 0; int32_t x = 0, y = 0, wheel = 0, pan = 0; };
+    struct Packet {
+        std::string bytes;
+        bool motion = false;
+        std::chrono::steady_clock::time_point queued_at = std::chrono::steady_clock::now();
+    };
     FD socket;
     std::mutex mutex;
     std::condition_variable condition;
@@ -38,11 +43,10 @@ class DatagramSender {
     static int16_t axis(int32_t value) { return int16_t(std::max(-32768, std::min(32767, value))); }
     static void u16(std::string& out, uint16_t value) { out.push_back(char(value)); out.push_back(char(value >> 8)); }
     static void u64(std::string& out, uint64_t value) { for (unsigned i = 0; i < 8; ++i) out.push_back(char(value >> (i * 8))); }
-    static uint64_t now() { timespec time{}; clock_gettime(CLOCK_REALTIME, &time); return uint64_t(time.tv_sec) * 1000000000ULL + uint64_t(time.tv_nsec); }
-    static std::string mouse(uint64_t device, int32_t x, int32_t y, int32_t wheel, int32_t pan, uint8_t flags = 0, uint8_t values = 0) {
+    static std::string mouse(uint64_t device, int32_t x, int32_t y, int32_t wheel, int32_t pan, uint8_t flags = 0, uint8_t values = 0, uint64_t timestamp = 0) {
         std::string out; out.reserve(flags ? 21 : 28); out.push_back(1); out.push_back(uint8_t(InputKind::mouse)); out.push_back(flags); out.push_back(0); u64(out, device);
         u16(out, uint16_t(axis(x))); u16(out, uint16_t(axis(y))); u16(out, uint16_t(axis(wheel))); u16(out, uint16_t(axis(pan)));
-        if (flags) out.push_back(char(values)); else u64(out, now()); return out;
+        if (flags) out.push_back(char(values)); else u64(out, timestamp ? timestamp : clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); return out;
     }
     static std::string keyboard(uint64_t device, const InputReport& report) {
         if (report.keys.size() > 255 || report.consumers.size() > 255) throw std::invalid_argument("Excessive keyboard state");
@@ -59,16 +63,15 @@ class DatagramSender {
     }
     void enqueue_locked(Packet packet) {
         if (stopping || !failure.empty()) throw std::runtime_error("Pointer helper disconnected" + (failure.empty() ? "" : ": " + failure));
-        // Preserve the peripheral's normal report cadence. Only merge once a
-        // genuine backlog exists, rather than turning one queued packet into
-        // a lower-rate stream during ordinary scheduling jitter.
-        if (packet.motion && queue.size() >= motion_backlog_threshold && queue.back().motion && queue.back().device == packet.device) {
-            auto& prior = queue.back(); prior.x += packet.x; prior.y += packet.y; prior.wheel += packet.wheel; prior.pan += packet.pan;
-            prior.bytes = mouse(prior.device, prior.x, prior.y, prior.wheel, prior.pan);
-        } else {
-            if (queue.size() >= 32) queue.erase(std::remove_if(queue.begin(), queue.end(), [](const Packet& item) { return item.motion; }), queue.end());
-            if (queue.size() >= 32) throw std::runtime_error("Pointer control queue is full"); queue.push_back(std::move(packet));
+        // Keep normal report cadence and discard older motion under pressure.
+        if (packet.motion && queue.size() >= motion_backlog_threshold) {
+            auto oldest = std::find_if(queue.begin(), queue.end(), [](const Packet& item) { return item.motion; });
+            if (oldest == queue.end()) return;
+            queue.erase(oldest);
         }
+        if (queue.size() >= 32) queue.erase(std::remove_if(queue.begin(), queue.end(), [](const Packet& item) { return item.motion; }), queue.end());
+        if (queue.size() >= 32) throw std::runtime_error("Pointer control queue is full");
+        queue.push_back(std::move(packet));
         condition.notify_all();
     }
     void run() noexcept {
@@ -77,10 +80,16 @@ class DatagramSender {
             Packet packet;
             { std::unique_lock<std::mutex> lock(mutex); condition.wait(lock, [&] { return stopping || !queue.empty(); }); if (stopping) break; packet = std::move(queue.front()); queue.pop_front(); sending = true; }
             while (!stopping) {
+                if (packet.motion && std::chrono::steady_clock::now() - packet.queued_at > std::chrono::milliseconds(50)) break;
                 auto count = ::send(socket.value, packet.bytes.data(), packet.bytes.size(), 0);
                 if (count == ssize_t(packet.bytes.size())) break;
                 if (count < 0 && errno == EINTR) continue;
-                if (count < 0 && (errno == ENOBUFS || errno == EAGAIN || errno == EWOULDBLOCK)) { std::unique_lock<std::mutex> lock(mutex); condition.wait_for(lock, std::chrono::milliseconds(5), [&] { return stopping.load(); }); continue; }
+                if (count < 0 && (errno == ENOBUFS || errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    if (packet.motion) break;
+                    std::unique_lock<std::mutex> lock(mutex);
+                    condition.wait_for(lock, std::chrono::milliseconds(5), [&] { return stopping.load(); });
+                    continue;
+                }
                 std::lock_guard<std::mutex> lock(mutex); failure = count < 0 ? std::strerror(errno) : "Partial pointer datagram"; queue.clear(); break;
             }
             { std::lock_guard<std::mutex> lock(mutex); sending = false; } condition.notify_all();
@@ -97,7 +106,7 @@ public:
         if (report.kind == InputKind::release) { buttons.erase(device); enqueue_locked({release(device)}); return; }
         if (report.kind == InputKind::keyboard) { enqueue_locked({keyboard(device, report)}); return; }
         uint8_t state = buttons[device], changed = report.button_mask & (state ^ report.button_values); state = (state & ~report.button_mask) | (report.button_values & report.button_mask); buttons[device] = state;
-        if (report.x || report.y || report.wheel || report.pan) enqueue_locked({mouse(device, report.x, report.y, report.wheel, report.pan), true, device, report.x, report.y, report.wheel, report.pan});
+        if (report.x || report.y || report.wheel || report.pan) enqueue_locked({mouse(device, report.x, report.y, report.wheel, report.pan, 0, 0, report.timestamp), true});
         if (changed) enqueue_locked({mouse(device, 0, 0, 0, 0, 1, state)});
     }
     bool drain(double seconds) { std::unique_lock<std::mutex> lock(mutex); return condition.wait_for(lock, std::chrono::duration<double>(seconds), [&] { return queue.empty() && !sending; }); }

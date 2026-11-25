@@ -26,6 +26,7 @@ from runtime_paths import data_directory
 from adapters import select_transport, migrate_bonds, forget_bond
 from bumble.keys import JsonKeyStore
 from audio_stream import A2DPTestTone, validate_audio_file
+import _driver_native
 from native_backend import call
 from session_channel import NullSessionChannel, SessionChannel
 
@@ -79,6 +80,9 @@ class DeviceOutput:
     def apply(self, report):
         self.output.apply(report, self.address)
 
+    def ingest_hid(self, parser, report_id, data, timestamp, keyboard):
+        return self.output.ingest_hid(parser, report_id, data, timestamp, keyboard, self.address)
+
     def release(self):
         self.output.release(self.address)
 
@@ -93,6 +97,8 @@ class Backend:
         self.device = None
         self.devices, self.addresses, self.last_emitted = {}, {}, {}
         self.scanning = False
+        self.discovery_until = 0
+        self.discovery_paused = False
         self.connection_tasks = {}
         self.stopping = False
         self.pointer = None
@@ -108,6 +114,11 @@ class Backend:
 
     def advertisement(self, adv):
         key = str(adv.address)
+        if not self.discovery_until and key not in self.saved.devices:
+            return
+        if _driver_native.touch_advertisement(self.devices, self.last_emitted, key,
+                                              time.monotonic(), time.time()):
+            return
         previous = self.devices.get(key) or self.saved.devices.get(key)
         info = advertisement_info(adv, previous)
         # Discard anonymous broadcast-only beacons. Keep known devices and
@@ -209,20 +220,38 @@ class Backend:
         self.retry_count.pop(key, None)
         self.emit('forgotten', address=key)
 
-    async def scan(self):
+    async def scan(self, explicit=True):
         async with self.scan_lock:
             if self.stopping:
                 return
+            if explicit:
+                self.discovery_paused = False
+                if self.scanning and not self.discovery_until:
+                    await self.device.stop_scanning()
+                    self.scanning = False
+                self.discovery_until = time.monotonic() + 15
+            elif self.discovery_until or self.discovery_paused or self.connecting_key:
+                return
+            elif not any(info.get('auto_reconnect') and key not in self.connection_tasks
+                         and key not in self.manual_pause and self.retry_at.get(key, 0) <= time.time()
+                         for key, info in self.saved.devices.items()):
+                if self.scanning:
+                    await self.device.stop_scanning()
+                    self.scanning = False
+                return
             if not self.scanning:
-                await self.device.start_scanning(legacy=True, active=True, scan_interval=10, scan_window=10)
+                await self.device.start_scanning(legacy=True, active=explicit,
+                                                 scan_interval=10 if explicit else 100, scan_window=10)
                 self.scanning = True
-            if self.device.classic_enabled and not self.device.discovering:
+            if explicit and self.device.classic_enabled and not self.device.discovering:
                 # A continuous BR/EDR inquiry loop conflicts with this adapter's
                 # audio ACL sessions. Run one inquiry per explicit Scan action.
                 await self.device.start_discovery(auto_restart=False)
+            if explicit:
+                self.emit('scanning')
 
     def expire_devices(self):
-        for key in call('expire', {'devices': self.devices, 'saved': self.saved.devices, 'now': time.time()}):
+        for key in _driver_native.expire_devices(self.devices, self.saved.devices, time.time()):
             self.devices.pop(key, None)
             self.addresses.pop(key, None)
             self.emit('device_removed', address=key)
@@ -232,10 +261,10 @@ class Backend:
             self.device.auto_restart_inquiry = False
             await self.device.send_command(hci.HCI_Inquiry_Cancel_Command(), check_result=True)
             self.device.discovering = False
-        self.emit('scanning')
 
     async def pause(self):
         async with self.scan_lock:
+            self.discovery_until = 0
             if self.scanning:
                 await self.device.stop_scanning()
                 self.scanning = False
@@ -243,7 +272,7 @@ class Backend:
 
     async def resume_scan(self):
         try:
-            await self.scan()
+            await self.scan(explicit=False)
         except Exception as exc:
             self.emit('error', message=f'Could not resume discovery: {exc}')
 
@@ -290,9 +319,9 @@ class Backend:
         self.emit('saved', **record)
 
     def reconnect_candidates(self, now=None):
-        return call('reconnect', {'now': time.time() if now is None else now, 'saved': self.saved.devices,
-                                  'devices': self.devices, 'paused': list(self.manual_pause),
-                                  'tasks': list(self.connection_tasks), 'retry_at': self.retry_at})
+        return _driver_native.reconnect_candidates(
+            self.devices, self.saved.devices, self.manual_pause, self.connection_tasks,
+            self.retry_at, time.time() if now is None else now)
 
     async def auto_reconnect(self):
         if self.stopping or not self.scanning or self.connecting_key or not (self.folder / 'pointer.sock').exists():
@@ -333,10 +362,6 @@ class Backend:
                     self.connecting_key = None
                     self.retry_count.pop(key, None)
                     self.remember(key)
-                if state == 'pairing' and not self.stopping:
-                    # LE scanning resumes after link establishment, so another
-                    # input device can be discovered while this one stays connected.
-                    asyncio.create_task(self.resume_scan())
             await use_mouse(self.device, self.addresses[key], args, pointer, observe)
         except asyncio.CancelledError:
             raise
@@ -389,7 +414,7 @@ class Backend:
                     self.devices[key] = dict(info, rssi=-127, connectable=True, last_seen=0)
                     self.addresses[key] = hci.Address(key)
                     self.emit('device', **self.devices[key])
-                await self.scan()
+                await self.resume_scan()
                 while not self.stopping:
                     # A closed/crashed GUI stops renewing its in-memory lease.
                     if self.events.heartbeat_expired():
@@ -407,13 +432,13 @@ class Backend:
                             if action == 'scan':
                                 await self.scan()
                             elif action == 'pause':
+                                self.discovery_paused = True
                                 await self.pause()
                                 self.emit('paused')
                             elif action == 'connect':
                                 await self.connect(command.get('address'))
                             elif action == 'disconnect':
                                 await self.disconnect(command.get('address'))
-                                await self.scan()
                             elif action == 'remember':
                                 if not isinstance(command.get('enabled'), bool):
                                     raise ValueError('Reconnect preference must be true or false')
@@ -433,6 +458,10 @@ class Backend:
                                 await self.forget_device(command.get('address'))
                         except Exception as exc:
                             self.emit('error', message=str(exc))
+                    if self.discovery_until and time.monotonic() >= self.discovery_until:
+                        await self.pause()
+                        self.emit('paused')
+                    await self.resume_scan()
                     await self.auto_reconnect()
                     self.expire_devices()
                     await asyncio.sleep(0.2)
